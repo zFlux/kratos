@@ -1,14 +1,13 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package x
 
 import (
 	"net/http"
 	"path"
 	"strings"
-
-	"github.com/urfave/negroni"
 )
-
-var _ negroni.Handler
 
 const AdminPrefix = "/admin"
 

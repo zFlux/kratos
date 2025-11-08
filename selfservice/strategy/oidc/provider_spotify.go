@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package oidc
 
 import (
@@ -10,6 +13,7 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/oauth2"
 
+	"github.com/ory/x/httpx"
 	"github.com/ory/x/stringslice"
 	"github.com/ory/x/stringsx"
 
@@ -19,15 +23,17 @@ import (
 	"github.com/ory/herodot"
 )
 
+var _ OAuth2Provider = (*ProviderSpotify)(nil)
+
 type ProviderSpotify struct {
 	config *Configuration
-	reg    dependencies
+	reg    Dependencies
 }
 
 func NewProviderSpotify(
 	config *Configuration,
-	reg dependencies,
-) *ProviderSpotify {
+	reg Dependencies,
+) Provider {
 	return &ProviderSpotify{
 		config: config,
 		reg:    reg,
@@ -68,11 +74,12 @@ func (g *ProviderSpotify) Claims(ctx context.Context, exchange *oauth2.Token, qu
 		spotifyauth.WithRedirectURL(g.config.Redir(g.reg.Config().OIDCRedirectURIBase(ctx))),
 		spotifyauth.WithScopes(spotifyauth.ScopeUserReadPrivate))
 
-	client := spotifyapi.New(auth.Client(ctx, exchange))
+	ctx, client := httpx.SetOAuth2(ctx, g.reg.HTTPClient(ctx), auth, exchange)
+	spotifyClient := spotifyapi.New(client.HTTPClient)
 
-	user, err := client.CurrentUser(ctx)
+	user, err := spotifyClient.CurrentUser(ctx)
 	if err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("%s", err))
+		return nil, errors.WithStack(herodot.ErrUpstreamError.WithWrap(err).WithReasonf("%s", err))
 	}
 
 	var userPicture string

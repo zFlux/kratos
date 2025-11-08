@@ -1,6 +1,9 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 import { appPrefix, assertRecoveryAddress, gen } from "../../../../helpers"
-import { routes as react } from "../../../../helpers/react"
 import { routes as express } from "../../../../helpers/express"
+import { routes as react } from "../../../../helpers/react"
 
 context("Account Recovery With Code Success", () => {
   ;[
@@ -28,11 +31,15 @@ context("Account Recovery With Code Success", () => {
 
       beforeEach(() => {
         cy.deleteMail()
-        cy.longRecoveryLifespan()
-        cy.longLinkLifespan()
-        cy.disableVerification()
-        cy.enableRecovery()
-        cy.useRecoveryStrategy("code")
+
+        cy.useConfig((builder) =>
+          builder
+            .longRecoveryLifespan()
+            .disableVerification()
+            .enableRecovery()
+            .useRecoveryStrategy("code")
+            .notifyUnknownRecipients("recovery", false),
+        )
 
         identity = gen.identityWithWebsite()
         cy.registerApi(identity)
@@ -50,7 +57,7 @@ context("Account Recovery With Code Success", () => {
         cy.get("button[value='code']").click()
         cy.get('[data-testid="ui/message/1060003"]').should(
           "have.text",
-          "An email containing a recovery code has been sent to the email address you provided.",
+          "An email containing a recovery code has been sent to the email address you provided. If you have not received an email, check the spelling of the address and make sure to use the address you registered with.",
         )
 
         cy.recoveryEmailWithCode({ expect: { email: identity.email } })
@@ -81,14 +88,12 @@ context("Account Recovery With Code Success", () => {
       })
 
       it("should recover account with correct code after entering wrong code", () => {
-        const identity = gen.identityWithWebsite()
-        cy.registerApi(identity)
         cy.visit(recovery)
         cy.get(appPrefix(app) + "input[name='email']").type(identity.email)
         cy.get("button[value='code']").click()
         cy.get('[data-testid="ui/message/1060003"]').should(
           "have.text",
-          "An email containing a recovery code has been sent to the email address you provided.",
+          "An email containing a recovery code has been sent to the email address you provided. If you have not received an email, check the spelling of the address and make sure to use the address you registered with.",
         )
         cy.get("input[name='code']").type("12312312") // Invalid code
         cy.get("button[value='code']").click()
@@ -113,14 +118,12 @@ context("Account Recovery With Code Success", () => {
       })
 
       it("should recover account after resending code", () => {
-        const identity = gen.identityWithWebsite()
-        cy.registerApi(identity)
         cy.visit(recovery)
         cy.get(appPrefix(app) + "input[name='email']").type(identity.email)
         cy.get("button[value='code']").click()
         cy.get('[data-testid="ui/message/1060003"]').should(
           "have.text",
-          "An email containing a recovery code has been sent to the email address you provided.",
+          "An email containing a recovery code has been sent to the email address you provided. If you have not received an email, check the spelling of the address and make sure to use the address you registered with.",
         )
 
         cy.recoveryEmailWithCode({
@@ -146,6 +149,17 @@ context("Account Recovery With Code Success", () => {
           identity.email,
         )
       })
+      it("should not notify an unknown recipient", () => {
+        const recipient = gen.email()
+
+        cy.visit(recovery)
+        cy.get('input[name="email"]').type(recipient)
+        cy.get(`[name="method"][value="code"]`).click()
+
+        cy.getCourierMessages().then((messages) => {
+          expect(messages.map((msg) => msg.recipient)).to.not.include(recipient)
+        })
+      })
     })
   })
 
@@ -155,21 +169,23 @@ context("Account Recovery With Code Success", () => {
     cy.useConfigProfile("recovery")
     cy.proxy(app)
 
-    cy.deleteMail()
-    cy.longRecoveryLifespan()
-    cy.longCodeLifespan()
-    cy.disableVerification()
-    cy.enableRecovery()
-    cy.useRecoveryStrategy("code")
+    cy.useConfig((builder) =>
+      builder
+        .longRecoveryLifespan()
+        .longCodeLifespan()
+        .disableVerification()
+        .enableRecovery()
+        .useRecoveryStrategy("code"),
+    )
 
     const identity = gen.identityWithWebsite()
     cy.registerApi(identity)
-    cy.visit(express.recovery + "?return_to=https://www.ory.sh/")
+    cy.visit(express.recovery + "?return_to=https://www.example.org/")
     cy.get("input[name='email']").type(identity.email)
     cy.get("button[value='code']").click()
     cy.get('[data-testid="ui/message/1060003"]').should(
       "have.text",
-      "An email containing a recovery code has been sent to the email address you provided.",
+      "An email containing a recovery code has been sent to the email address you provided. If you have not received an email, check the spelling of the address and make sure to use the address you registered with.",
     )
 
     cy.recoveryEmailWithCode({ expect: { email: identity.email } })
@@ -180,6 +196,6 @@ context("Account Recovery With Code Success", () => {
 
     cy.get('input[name="password"]').clear().type(gen.password())
     cy.get('button[value="password"]').click()
-    cy.url().should("eq", "https://www.ory.sh/")
+    cy.url().should("eq", "https://www.example.org/")
   })
 })

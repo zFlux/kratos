@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package identity_test
 
 import (
@@ -16,7 +19,6 @@ import (
 	"github.com/ory/x/httpx"
 
 	"github.com/golang/mock/gomock"
-	"github.com/julienschmidt/httprouter"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ory/kratos/driver/config"
@@ -35,13 +37,13 @@ func TestSchemaValidatorDisallowsInternalNetworkRequests(t *testing.T) {
 
 	v := NewValidator(reg)
 	n := negroni.New(x.HTTPLoaderContextMiddleware(reg))
-	router := httprouter.New()
-	router.GET("/:id", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	router := http.NewServeMux()
+	router.HandleFunc("GET /{id}", func(w http.ResponseWriter, r *http.Request) {
 		i := &Identity{
-			SchemaID: ps.ByName("id"),
+			SchemaID: r.PathValue("id"),
 			Traits:   Traits(`{ "firstName": "first-name", "lastName": "last-name", "age": 1 }`),
 		}
-		_, _ = w.Write([]byte(fmt.Sprintf("%+v", v.Validate(r.Context(), i))))
+		_, _ = fmt.Fprintf(w, "%+v", v.Validate(r.Context(), i))
 	})
 	n.UseHandler(router)
 
@@ -52,15 +54,15 @@ func TestSchemaValidatorDisallowsInternalNetworkRequests(t *testing.T) {
 	do := func(t *testing.T, id string) string {
 		res, err := ts.Client().Get(ts.URL + "/" + id)
 		require.NoError(t, err)
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		body, err := io.ReadAll(res.Body)
 		require.NoError(t, err)
 		return string(body)
 	}
 
 	for _, tc := range [][2]string{
-		{"localhost", "ip 127.0.0.1 is in the 127.0.0.0/8 range"},
-		{"privateRef", "ip 192.168.178.1 is in the 192.168.0.0/16 range"},
+		{"localhost", "is not a permitted destination"},
+		{"privateRef", "is not a permitted destination"},
 	} {
 		t.Run(fmt.Sprintf("case=%s", tc[0]), func(t *testing.T) {
 			assert.Contains(t, do(t, tc[0]), tc[1])
@@ -72,8 +74,8 @@ func TestSchemaValidator(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	router := httprouter.New()
-	router.GET("/schema/:name", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	router := http.NewServeMux()
+	router.HandleFunc("GET /schema/{name}", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{
   "$id": "https://example.com/person.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -83,7 +85,7 @@ func TestSchemaValidator(t *testing.T) {
 	"traits": {
 	  "type": "object",
 	  "properties": {
-        "` + ps.ByName("name") + `": {
+        "` + r.PathValue("name") + `": {
           "type": "string",
           "description": "The person's first name."
         },
@@ -154,7 +156,7 @@ func TestSchemaValidator(t *testing.T) {
 				SchemaID: "unreachable-url",
 				Traits:   Traits(`{ "firstName": "first-name", "lastName": "last-name", "age": 1 }`),
 			},
-			err: "An internal server error occurred, please contact the system administrator",
+			err: "Invalid configuration",
 		},
 	} {
 		t.Run(fmt.Sprintf("case=%d", k), func(t *testing.T) {

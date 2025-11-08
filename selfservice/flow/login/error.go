@@ -1,9 +1,21 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package login
 
 import (
 	"net/http"
 
+	"github.com/gofrs/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/ory/x/otelx"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ory/kratos/selfservice/sessiontokenexchange"
 	"github.com/ory/kratos/ui/node"
+	"github.com/ory/kratos/x/events"
 
 	"github.com/ory/kratos/selfservice/flow"
 	"github.com/ory/kratos/text"
@@ -34,7 +46,9 @@ type (
 		errorx.ManagementProvider
 		x.WriterProvider
 		x.LoggingProvider
+		x.TracingProvider
 		config.Provider
+		sessiontokenexchange.PersistenceProvider
 
 		FlowPersistenceProvider
 		HandlerProvider
@@ -52,35 +66,46 @@ func NewFlowErrorHandler(d errorHandlerDependencies) *ErrorHandler {
 }
 
 func (s *ErrorHandler) PrepareReplacementForExpiredFlow(w http.ResponseWriter, r *http.Request, f *Flow, err error) (*flow.ExpiredError, error) {
-	e := new(flow.ExpiredError)
-	if !errors.As(err, &e) {
+	errExpired := new(flow.ExpiredError)
+	if !errors.As(err, &errExpired) {
 		return nil, nil
 	}
 	// create new flow because the old one is not valid
-	a, err := s.d.LoginHandler().FromOldFlow(w, r, *f)
+	newFlow, err := s.d.LoginHandler().FromOldFlow(w, r, *f)
 	if err != nil {
 		return nil, err
 	}
 
-	a.UI.Messages.Add(text.NewErrorValidationLoginFlowExpired(e.Ago))
-	if err := s.d.LoginFlowPersister().UpdateLoginFlow(r.Context(), a); err != nil {
+	newFlow.UI.Messages.Add(text.NewErrorValidationLoginFlowExpired(errExpired.ExpiredAt))
+	if err := s.d.LoginFlowPersister().UpdateLoginFlow(r.Context(), newFlow); err != nil {
 		return nil, err
 	}
 
-	return e.WithFlow(a), nil
+	return errExpired.WithFlow(newFlow), nil
 }
 
 func (s *ErrorHandler) WriteFlowError(w http.ResponseWriter, r *http.Request, f *Flow, group node.UiNodeGroup, err error) {
-	s.d.Audit().
+	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.flow.login.ErrorHandler.WriteFlowError",
+		trace.WithAttributes(attribute.String("error", err.Error())))
+	r = r.WithContext(ctx)
+	defer otelx.End(span, &err)
+
+	logger := s.d.Audit().
 		WithError(err).
 		WithRequest(r).
-		WithField("login_flow", f).
+		WithField("login_flow", f.ToLoggerField())
+
+	logger.
 		Info("Encountered self-service login error.")
 
 	if f == nil {
+		trace.SpanFromContext(r.Context()).AddEvent(events.NewLoginFailed(r.Context(), uuid.Nil, "", "", false, err))
 		s.forward(w, r, nil, err)
 		return
 	}
+
+	span.SetAttributes(attribute.String("flow_id", f.ID.String()))
+	trace.SpanFromContext(r.Context()).AddEvent(events.NewLoginFailed(r.Context(), f.ID, string(f.Type), string(f.RequestedAAL), f.Refresh, err))
 
 	if expired, inner := s.PrepareReplacementForExpiredFlow(w, r, f, err); inner != nil {
 		s.WriteFlowError(w, r, f, group, inner)
@@ -112,6 +137,12 @@ func (s *ErrorHandler) WriteFlowError(w http.ResponseWriter, r *http.Request, f 
 
 	if f.Type == flow.TypeBrowser && !x.IsJSONRequest(r) {
 		http.Redirect(w, r, f.AppendTo(s.d.Config().SelfServiceFlowLoginUI(r.Context())).String(), http.StatusSeeOther)
+		return
+	}
+
+	_, hasCode, _ := s.d.SessionTokenExchangePersister().CodeForFlow(r.Context(), f.ID)
+	if f.Type == flow.TypeAPI && hasCode && group == node.OpenIDConnectGroup {
+		http.Redirect(w, r, f.ReturnTo, http.StatusSeeOther)
 		return
 	}
 

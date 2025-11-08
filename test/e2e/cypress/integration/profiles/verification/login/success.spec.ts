@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 import { appPrefix, gen } from "../../../../helpers"
 import { routes as react } from "../../../../helpers/react"
 import { routes as express } from "../../../../helpers/express"
@@ -19,7 +22,7 @@ context("Account Verification Login Success", () => {
       before(() => {
         cy.deleteMail()
         cy.useConfigProfile(profile)
-        cy.enableLoginForVerifiedAddressOnly()
+        cy.useConfig((builder) => builder.enableLoginForVerifiedAddressOnly())
         cy.proxy(app)
       })
 

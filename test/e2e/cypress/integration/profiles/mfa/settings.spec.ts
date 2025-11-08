@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 import { appPrefix, gen, website } from "../../../helpers"
 import { routes as express } from "../../../helpers/express"
 import { routes as react } from "../../../helpers/react"
@@ -36,6 +39,7 @@ context("2FA UI settings tests", () => {
 
       beforeEach(() => {
         cy.clearAllCookies()
+        cy.useConfig((builder) => builder.disableCodeMfa())
         cy.login({ email, password, cookieUrl: base })
         cy.visit(settings)
       })

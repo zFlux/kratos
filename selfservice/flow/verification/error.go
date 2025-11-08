@@ -1,8 +1,22 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package verification
 
 import (
 	"net/http"
 	"net/url"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/ory/kratos/x/nosurfx"
+	"github.com/ory/x/otelx"
+
+	"github.com/gofrs/uuid"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ory/kratos/x/events"
 
 	"github.com/ory/kratos/ui/node"
 
@@ -19,16 +33,16 @@ import (
 	"github.com/ory/kratos/x"
 )
 
-var (
-	ErrHookAbortFlow = errors.New("aborted verification hook execution")
-)
+var ErrHookAbortFlow = errors.New("aborted verification hook execution")
 
 type (
 	errorHandlerDependencies interface {
 		errorx.ManagementProvider
 		x.WriterProvider
 		x.LoggingProvider
-		x.CSRFTokenGeneratorProvider
+		x.TracingProvider
+		nosurfx.CSRFProvider
+		nosurfx.CSRFTokenGeneratorProvider
 		config.Provider
 		FlowPersistenceProvider
 		StrategyProvider
@@ -54,28 +68,49 @@ func (s *ErrorHandler) WriteFlowError(
 	group node.UiNodeGroup,
 	err error,
 ) {
-	s.d.Audit().
+	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.flow.verification.ErrorHandler.WriteFlowError",
+		trace.WithAttributes(
+			attribute.String("error", err.Error()),
+		))
+	r = r.WithContext(ctx)
+	defer otelx.End(span, &err)
+
+	logger := s.d.Audit().
 		WithError(err).
 		WithRequest(r).
-		WithField("verification_flow", f).
+		WithField("verification_flow", f.ToLoggerField())
+
+	logger.
 		Info("Encountered self-service verification error.")
 
 	if f == nil {
+		trace.SpanFromContext(r.Context()).AddEvent(events.NewVerificationFailed(r.Context(), uuid.Nil, "", "", err))
 		s.forward(w, r, nil, err)
 		return
 	}
+	span.SetAttributes(attribute.String("flow_id", f.ID.String()))
+	trace.SpanFromContext(r.Context()).AddEvent(events.NewVerificationFailed(r.Context(), f.ID, string(f.Type), f.Active.String(), err))
 
 	if e := new(flow.ExpiredError); errors.As(err, &e) {
+		strategy, err := s.d.VerificationStrategies(r.Context()).Strategy(f.Active.String())
+		if err != nil {
+			strategy, err = s.d.GetActiveVerificationStrategy(r.Context())
+			// Can't retry the verification if no strategy has been set
+			if err != nil {
+				s.d.SelfServiceErrorManager().Forward(r.Context(), w, r, err)
+				return
+			}
+		}
 		// create new flow because the old one is not valid
 		a, err := FromOldFlow(s.d.Config(), s.d.Config().SelfServiceFlowVerificationRequestLifespan(r.Context()),
-			s.d.GenerateCSRFToken(r), r, s.d.VerificationStrategies(r.Context()), f)
+			s.d.CSRFHandler().RegenerateToken(w, r), r, strategy, f)
 		if err != nil {
 			// failed to create a new session and redirect to it, handle that error as a new one
 			s.WriteFlowError(w, r, f, group, err)
 			return
 		}
 
-		a.UI.Messages.Add(text.NewErrorValidationVerificationFlowExpired(e.Ago))
+		a.UI.Messages.Add(text.NewErrorValidationVerificationFlowExpired(e.ExpiredAt))
 		if err := s.d.VerificationFlowPersister().CreateVerificationFlow(r.Context(), a); err != nil {
 			s.forward(w, r, a, err)
 			return

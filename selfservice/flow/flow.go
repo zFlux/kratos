@@ -1,18 +1,25 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package flow
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 
-	"github.com/pkg/errors"
+	"github.com/ory/x/sqlxx"
 
-	"github.com/ory/kratos/ui/container"
-
-	"github.com/ory/herodot"
-	"github.com/ory/kratos/x"
+	"github.com/ory/kratos/x/redir"
 
 	"github.com/gofrs/uuid"
+	"github.com/pkg/errors"
 
+	"github.com/ory/herodot"
+	"github.com/ory/kratos/driver/config"
+	"github.com/ory/kratos/ui/container"
+	"github.com/ory/kratos/x"
 	"github.com/ory/x/urlx"
 )
 
@@ -34,4 +41,22 @@ type Flow interface {
 	GetRequestURL() string
 	AppendTo(*url.URL) *url.URL
 	GetUI() *container.Container
+	GetState() State
+	SetState(State)
+	GetFlowName() FlowName
+	GetTransientPayload() json.RawMessage
+}
+
+type FlowWithRedirect interface {
+	SecureRedirectToOpts(ctx context.Context, cfg config.Provider) (opts []redir.SecureRedirectOption)
+}
+
+type InternalContexter interface {
+	EnsureInternalContext()
+	GetInternalContext() sqlxx.JSONRawMessage
+	SetInternalContext(sqlxx.JSONRawMessage)
+}
+
+type OAuth2ChallengeProvider interface {
+	GetOAuth2LoginChallenge() sqlxx.NullString
 }

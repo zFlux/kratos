@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package x
 
 import (
@@ -7,15 +10,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/julienschmidt/httprouter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/negroni"
 )
 
 func TestRedirectAdmin(t *testing.T) {
-	router := httprouter.New()
-	router.GET("/admin/identities", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	router := http.NewServeMux()
+	router.HandleFunc("GET /admin/identities", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("identities"))
 	})
 	n := negroni.New()
@@ -43,7 +45,7 @@ func TestRedirectAdmin(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectedCode, res.StatusCode)
 			assert.Equal(t, tc.expectedPath, res.Request.URL.Path)
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			if tc.expectedBody != "" {
 				body, err := io.ReadAll(res.Body)
 				require.NoError(t, err)

@@ -1,10 +1,13 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package password_test
 
 import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" //#nosec G505 -- compatibility for imported passwords
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +16,8 @@ import (
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/ory/kratos/text"
 
 	"github.com/stretchr/testify/assert"
 
@@ -65,7 +70,7 @@ func TestDefaultPasswordValidationStrategy(t *testing.T) {
 			{pw: "hello@example.com", id: "hello@exam", pass: false},
 			{id: "abcd", pw: "9d3c8a1b", pass: true},
 			{id: "a", pw: "kjOklafe", pass: true},
-			{id: "ab", pw: "0000ab0000", pass: true},
+			{id: "ab", pw: "0000ab0000123", pass: true},
 			// longest common substring with long password
 			{id: "d4f6090b-5a84", pw: "d4f6090b-5a84-2184-4404-8d1b-8da3eb00ebbe", pass: true},
 			{id: "asdflasdflasdf", pw: "asdflasdflpiuhefnciluaksdzuföfhg", pass: true},
@@ -82,14 +87,17 @@ func TestDefaultPasswordValidationStrategy(t *testing.T) {
 				}
 			})
 		}
-
 	})
 
 	t.Run("failure cases", func(t *testing.T) {
 		conf, reg := internal.NewFastRegistryWithMocks(t)
 		s, _ := password.NewDefaultPasswordValidatorStrategy(reg)
 		fakeClient := NewFakeHTTPClient()
-		s.Client = httpx.NewResilientClient(httpx.ResilientClientWithClient(&fakeClient.Client), httpx.ResilientClientWithMaxRetry(1), httpx.ResilientClientWithConnectionTimeout(time.Millisecond), httpx.ResilientClientWithMaxRetryWait(time.Millisecond))
+		s.Client = httpx.NewResilientClient(
+			httpx.ResilientClientWithMaxRetry(1),
+			httpx.ResilientClientWithConnectionTimeout(time.Millisecond),
+			httpx.ResilientClientWithMaxRetryWait(time.Millisecond))
+		s.Client.HTTPClient = &fakeClient.Client
 
 		t.Run("case=should send request to pwnedpasswords.com", func(t *testing.T) {
 			conf.MustSet(ctx, config.ViperKeyIgnoreNetworkErrors, false)
@@ -138,10 +146,11 @@ func TestDefaultPasswordValidationStrategy(t *testing.T) {
 				Request:       req,
 			}, nil
 		}
-		s.Client = httpx.NewResilientClient(httpx.ResilientClientWithClient(&fakeClient.Client), httpx.ResilientClientWithMaxRetry(1), httpx.ResilientClientWithConnectionTimeout(time.Millisecond))
+		s.Client = httpx.NewResilientClient(httpx.ResilientClientWithMaxRetry(1), httpx.ResilientClientWithConnectionTimeout(time.Millisecond))
+		s.Client.HTTPClient = &fakeClient.Client
 
-		var hashPw = func(t *testing.T, pw string) string {
-			/* #nosec G401 sha1 is used for k-anonymity */
+		hashPw := func(t *testing.T, pw string) string {
+			//#nosec G401 -- sha1 is used for k-anonymity
 			h := sha1.New()
 			_, err := h.Write([]byte(pw))
 			require.NoError(t, err)
@@ -178,7 +187,7 @@ func TestDefaultPasswordValidationStrategy(t *testing.T) {
 				res: func(t *testing.T, hash string) string {
 					return fmt.Sprintf("%s:text\n%s:2", hashPw(t, randomPassword(t)), hash)
 				},
-				expectErr: herodot.ErrInternalServerError,
+				expectErr: herodot.ErrUpstreamError,
 			},
 			{
 				name: "is missing hash count",
@@ -221,7 +230,9 @@ func TestDefaultPasswordValidationStrategy(t *testing.T) {
 				res: func(t *testing.T, hash string) string {
 					return fmt.Sprintf("%s:%d", hash, conf.PasswordPolicyConfig(ctx).MaxBreaches+1)
 				},
-				expectErr: password.ErrTooManyBreaches,
+				expectErr: text.NewErrorValidationPasswordTooManyBreaches(
+					int64(conf.PasswordPolicyConfig(ctx).MaxBreaches) + 1, // #nosec G115
+				),
 			},
 		} {
 			t.Run(fmt.Sprintf("case=%s/expected err=%s", tc.name, tc.expectErr), func(t *testing.T) {
@@ -256,7 +267,8 @@ func TestChangeHaveIBeenPwnedValidationHost(t *testing.T) {
 	conf.MustSet(ctx, config.ViperKeyPasswordHaveIBeenPwnedHost, testServerURL.Host)
 
 	fakeClient := NewFakeHTTPClient()
-	s.Client = httpx.NewResilientClient(httpx.ResilientClientWithClient(&fakeClient.Client), httpx.ResilientClientWithMaxRetry(1), httpx.ResilientClientWithConnectionTimeout(time.Millisecond))
+	s.Client = httpx.NewResilientClient(httpx.ResilientClientWithMaxRetry(1), httpx.ResilientClientWithConnectionTimeout(time.Millisecond))
+	s.Client.HTTPClient = &fakeClient.Client
 
 	testServerExpectedCallURL := fmt.Sprintf("https://%s/range/BCBA9", testServerURL.Host)
 
@@ -274,7 +286,8 @@ func TestDisableHaveIBeenPwnedValidationHost(t *testing.T) {
 	conf.MustSet(ctx, config.ViperKeyPasswordHaveIBeenPwnedEnabled, false)
 
 	fakeClient := NewFakeHTTPClient()
-	s.Client = httpx.NewResilientClient(httpx.ResilientClientWithClient(&fakeClient.Client), httpx.ResilientClientWithMaxRetry(1), httpx.ResilientClientWithConnectionTimeout(time.Millisecond))
+	s.Client = httpx.NewResilientClient(httpx.ResilientClientWithMaxRetry(1), httpx.ResilientClientWithConnectionTimeout(time.Millisecond))
+	s.Client.HTTPClient = &fakeClient.Client
 
 	t.Run("case=should not send request to test server", func(t *testing.T) {
 		require.NoError(t, s.Validate(context.Background(), "mohutdesub", "damrumukuh"))
@@ -368,7 +381,7 @@ func (c *fakeHttpClient) RequestedURLs() []string {
 func (c *fakeHttpClient) handle(request *http.Request) (*http.Response, error) {
 	c.requestedURLs = append(c.requestedURLs, request.URL.String())
 	if request.Body != nil {
-		request.Body.Close()
+		_ = request.Body.Close()
 	}
 	return c.responder(request)
 }

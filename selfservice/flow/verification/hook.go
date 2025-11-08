@@ -1,9 +1,18 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package verification
 
 import (
 	"context"
 	"fmt"
 	"net/http"
+
+	"github.com/ory/kratos/x/nosurfx"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ory/kratos/x/events"
 
 	"github.com/ory/kratos/driver/config"
 	"github.com/ory/kratos/identity"
@@ -25,8 +34,8 @@ type (
 	PostHookExecutorFunc func(w http.ResponseWriter, r *http.Request, a *Flow, i *identity.Identity) error
 
 	HooksProvider interface {
-		PostVerificationHooks(ctx context.Context) []PostHookExecutor
-		PreVerificationHooks(ctx context.Context) []PreHookExecutor
+		PostVerificationHooks(ctx context.Context) ([]PostHookExecutor, error)
+		PreVerificationHooks(ctx context.Context) ([]PreHookExecutor, error)
 	}
 )
 
@@ -53,7 +62,7 @@ type (
 		identity.ValidationProvider
 		session.PersistenceProvider
 		HooksProvider
-		x.CSRFTokenGeneratorProvider
+		nosurfx.CSRFTokenGeneratorProvider
 		x.LoggingProvider
 		x.WriterProvider
 	}
@@ -74,7 +83,11 @@ func NewHookExecutor(d executorDependencies) *HookExecutor {
 }
 
 func (e *HookExecutor) PreVerificationHook(w http.ResponseWriter, r *http.Request, a *Flow) error {
-	for _, executor := range e.d.PreVerificationHooks(r.Context()) {
+	hooks, err := e.d.PreVerificationHooks(r.Context())
+	if err != nil {
+		return err
+	}
+	for _, executor := range hooks {
 		if err := executor.ExecuteVerificationPreHook(w, r, a); err != nil {
 			return err
 		}
@@ -88,22 +101,24 @@ func (e *HookExecutor) PostVerificationHook(w http.ResponseWriter, r *http.Reque
 		WithRequest(r).
 		WithField("identity_id", i.ID).
 		Debug("Running ExecutePostVerificationHooks.")
-	for k, executor := range e.d.PostVerificationHooks(r.Context()) {
+	hooks, err := e.d.PostVerificationHooks(r.Context())
+	if err != nil {
+		return err
+	}
+	for k, executor := range hooks {
 		if err := executor.ExecutePostVerificationHook(w, r, a, i); err != nil {
-			var traits identity.Traits
-			if i != nil {
-				traits = i.Traits
-			}
-			return flow.HandleHookError(w, r, a, traits, node.LinkGroup, err, e.d, e.d)
+			return flow.HandleHookError(w, r, a, i.Traits, node.LinkGroup, err, e.d, e.d)
 		}
 
 		e.d.Logger().WithRequest(r).
 			WithField("executor", fmt.Sprintf("%T", executor)).
 			WithField("executor_position", k).
-			WithField("executors", PostHookVerificationExecutorNames(e.d.PostVerificationHooks(r.Context()))).
+			WithField("executors", PostHookVerificationExecutorNames(hooks)).
 			WithField("identity_id", i.ID).
 			Debug("ExecutePostVerificationHook completed successfully.")
 	}
+
+	trace.SpanFromContext(r.Context()).AddEvent(events.NewVerificationSucceeded(r.Context(), a.ID, i.ID, string(a.Type), a.Active.String()))
 
 	e.d.Logger().
 		WithRequest(r).

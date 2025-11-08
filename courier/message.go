@@ -1,7 +1,9 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package courier
 
 import (
-	"context"
 	"encoding/json"
 	"time"
 
@@ -9,6 +11,9 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/ory/herodot"
+	"github.com/ory/kratos/courier/template"
+	keysetpagination "github.com/ory/x/pagination/keysetpagination_v2"
+	"github.com/ory/x/sqlxx"
 	"github.com/ory/x/stringsx"
 )
 
@@ -84,7 +89,6 @@ func (ms *MessageStatus) UnmarshalJSON(data []byte) error {
 	}
 
 	s, err := ToMessageStatus(str)
-
 	if err != nil {
 		return err
 	}
@@ -102,20 +106,20 @@ type MessageType int
 
 const (
 	MessageTypeEmail MessageType = iota + 1
-	MessageTypePhone
+	MessageTypeSMS
 )
 
 const (
 	messageTypeEmailText = "email"
-	messageTypePhoneText = "phone"
+	messageTypeSMSText   = "sms"
 )
 
 func ToMessageType(str string) (MessageType, error) {
 	switch s := stringsx.SwitchExact(str); {
 	case s.AddCase(messageTypeEmailText):
 		return MessageTypeEmail, nil
-	case s.AddCase(messageTypePhoneText):
-		return MessageTypePhone, nil
+	case s.AddCase(messageTypeSMSText):
+		return MessageTypeSMS, nil
 	default:
 		return 0, errors.WithStack(herodot.ErrBadRequest.WithWrap(s.ToUnknownCaseErr()).WithReason("Message type is not valid"))
 	}
@@ -125,8 +129,8 @@ func (mt MessageType) String() string {
 	switch mt {
 	case MessageTypeEmail:
 		return messageTypeEmailText
-	case MessageTypePhone:
-		return messageTypePhoneText
+	case MessageTypeSMS:
+		return messageTypeSMSText
 	default:
 		return ""
 	}
@@ -134,7 +138,7 @@ func (mt MessageType) String() string {
 
 func (mt MessageType) IsValid() error {
 	switch mt {
-	case MessageTypeEmail, MessageTypePhone:
+	case MessageTypeEmail, MessageTypeSMS:
 		return nil
 	default:
 		return errors.WithStack(herodot.ErrBadRequest.WithReason("Message type is not valid"))
@@ -165,31 +169,57 @@ func (mt *MessageType) UnmarshalJSON(data []byte) error {
 
 // swagger:model message
 type Message struct {
-	ID           uuid.UUID     `json:"id" faker:"-" db:"id"`
-	NID          uuid.UUID     `json:"-" faker:"-" db:"nid"`
-	Status       MessageStatus `json:"status" db:"status"`
-	Type         MessageType   `json:"type" db:"type"`
-	Recipient    string        `json:"recipient" db:"recipient"`
-	Body         string        `json:"body" db:"body"`
-	Subject      string        `json:"subject" db:"subject"`
-	TemplateType TemplateType  `json:"template_type" db:"template_type"`
-	TemplateData []byte        `json:"-" db:"template_data"`
-	SendCount    int           `json:"send_count" db:"send_count"`
+	// required: true
+	ID uuid.UUID `json:"id" faker:"-" db:"id"`
+
+	NID uuid.UUID `json:"-" faker:"-" db:"nid"`
+	// required: true
+	Status MessageStatus `json:"status" db:"status"`
+	// required: true
+	Type MessageType `json:"type" db:"type"`
+	// required: true
+	Recipient string `json:"recipient" db:"recipient"`
+	// required: true
+	Body string `json:"body" db:"body"`
+	// required: true
+	Subject string `json:"subject" db:"subject"`
+	// required: true
+	TemplateType template.TemplateType `json:"template_type" db:"template_type"`
+
+	Channel sqlxx.NullString `json:"channel" db:"channel"`
+
+	TemplateData []byte `json:"-" db:"template_data"`
+	// required: true
+	SendCount int `json:"send_count" db:"send_count"`
+
+	// Dispatches store information about the attempts of delivering a message
+	// May contain an error if any happened, or just the `success` state.
+	Dispatches []MessageDispatch `json:"dispatches,omitempty" has_many:"courier_message_dispatches" order_by:"created_at desc" faker:"-"`
 
 	// CreatedAt is a helper struct field for gobuffalo.pop.
+	// required: true
 	CreatedAt time.Time `json:"created_at" faker:"-" db:"created_at"`
 	// UpdatedAt is a helper struct field for gobuffalo.pop.
+	// required: true
 	UpdatedAt time.Time `json:"updated_at" faker:"-" db:"updated_at"`
 }
 
-func (m Message) TableName(ctx context.Context) string {
-	return "courier_messages"
+func (m Message) PageToken() keysetpagination.PageToken {
+	return keysetpagination.NewPageToken(
+		keysetpagination.Column{
+			Name:  "created_at",
+			Order: keysetpagination.OrderDescending,
+			Value: m.CreatedAt,
+		}, keysetpagination.Column{
+			Name:  "id",
+			Value: m.ID,
+		},
+	)
 }
 
-func (m *Message) GetID() uuid.UUID {
-	return m.ID
+func (m Message) DefaultPageToken() keysetpagination.PageToken {
+	return Message{ID: uuid.Nil, CreatedAt: time.Date(2200, 12, 31, 23, 59, 59, 0, time.UTC)}.PageToken()
 }
 
-func (m *Message) GetNID() uuid.UUID {
-	return m.NID
-}
+func (m Message) TableName() string { return "courier_messages" }
+func (m *Message) GetID() uuid.UUID { return m.ID }

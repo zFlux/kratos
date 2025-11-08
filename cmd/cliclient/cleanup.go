@@ -1,9 +1,10 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package cliclient
 
 import (
 	"github.com/pkg/errors"
-
-	"github.com/ory/x/servicelocatorx"
 
 	"github.com/ory/x/contextx"
 
@@ -38,9 +39,7 @@ func (h *CleanupHandler) CleanupSQL(cmd *cobra.Command, args []string) error {
 	d, err := driver.NewWithoutInit(
 		cmd.Context(),
 		cmd.ErrOrStderr(),
-		servicelocatorx.NewOptions(),
-		nil,
-		opts,
+		driver.WithConfigOptions(opts...),
 	)
 	if len(d.Config().DSN(cmd.Context())) == 0 {
 		return errors.New(`required config value "dsn" was not set`)
@@ -48,7 +47,7 @@ func (h *CleanupHandler) CleanupSQL(cmd *cobra.Command, args []string) error {
 		return errors.Wrap(err, "An error occurred initializing cleanup")
 	}
 
-	err = d.Init(cmd.Context(), &contextx.Default{}, driver.SkipNetworkInit)
+	err = d.Init(cmd.Context(), &contextx.Default{})
 	if err != nil {
 		return errors.Wrap(err, "An error occurred initializing cleanup")
 	}

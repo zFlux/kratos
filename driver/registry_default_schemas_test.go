@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package driver_test
 
 import (
@@ -36,7 +39,7 @@ func TestRegistryDefault_IdentityTraitsSchemas(t *testing.T) {
 
 	ss, err := reg.IdentityTraitsSchemas(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 2, len(ss))
+	assert.Equal(t, 2, ss.Total())
 	assert.Contains(t, ss, defaultSchema)
 	assert.Contains(t, ss, altSchema)
 }

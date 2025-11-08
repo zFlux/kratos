@@ -1,7 +1,9 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package identity
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 
 const (
 	RecoveryAddressTypeEmail RecoveryAddressType = AddressTypeEmail
+	RecoveryAddressTypeSMS   RecoveryAddressType = AddressTypeSMS
 )
 
 type (
@@ -21,7 +24,6 @@ type (
 
 	// swagger:model recoveryIdentityAddress
 	RecoveryAddress struct {
-		// required: true
 		ID uuid.UUID `json:"id" db:"id" faker:"-"`
 
 		// required: true
@@ -44,20 +46,17 @@ func (v RecoveryAddressType) HTMLFormInputType() string {
 	switch v {
 	case RecoveryAddressTypeEmail:
 		return "email"
+	case RecoveryAddressTypeSMS:
+		return "tel"
 	}
 	return ""
 }
 
-func (a RecoveryAddress) TableName(ctx context.Context) string {
-	return "identity_recovery_addresses"
-}
+func (a RecoveryAddress) TableName() string { return "identity_recovery_addresses" }
+func (a RecoveryAddress) GetID() uuid.UUID  { return a.ID }
 
-func (a RecoveryAddress) ValidateNID() error {
-	return nil
-}
-
-// Hash returns a unique string representation for the recovery address.
-func (a RecoveryAddress) Hash() string {
+// Signature returns a unique string representation for the recovery address.
+func (a RecoveryAddress) Signature() string {
 	return fmt.Sprintf("%v|%v|%v|%v", a.Value, a.Via, a.IdentityID, a.NID)
 }
 
@@ -68,6 +67,17 @@ func NewRecoveryEmailAddress(
 	return &RecoveryAddress{
 		Value:      value,
 		Via:        RecoveryAddressTypeEmail,
+		IdentityID: identity,
+	}
+}
+
+func NewRecoverySMSAddress(
+	value string,
+	identity uuid.UUID,
+) *RecoveryAddress {
+	return &RecoveryAddress{
+		Value:      value,
+		Via:        RecoveryAddressTypeSMS,
 		IdentityID: identity,
 	}
 }

@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package oidc
 
 import (
@@ -16,15 +19,17 @@ import (
 	"github.com/ory/herodot"
 )
 
+var _ OAuth2Provider = (*ProviderVK)(nil)
+
 type ProviderVK struct {
 	config *Configuration
-	reg    dependencies
+	reg    Dependencies
 }
 
 func NewProviderVK(
 	config *Configuration,
-	reg dependencies,
-) *ProviderVK {
+	reg Dependencies,
+) Provider {
 	return &ProviderVK{
 		config: config,
 		reg:    reg,
@@ -57,23 +62,26 @@ func (g *ProviderVK) OAuth2(ctx context.Context) (*oauth2.Config, error) {
 }
 
 func (g *ProviderVK) Claims(ctx context.Context, exchange *oauth2.Token, query url.Values) (*Claims, error) {
-
 	o, err := g.OAuth2(ctx)
 	if err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("%s", err))
+		return nil, err
 	}
 
-	client := g.reg.HTTPClient(ctx, httpx.ResilientClientWithClient(o.Client(ctx, exchange)))
-	req, err := retryablehttp.NewRequest("GET", "https://api.vk.com/method/users.get?fields=photo_200,nickname,bdate,sex&access_token="+exchange.AccessToken+"&v=5.103", nil)
+	ctx, client := httpx.SetOAuth2(ctx, g.reg.HTTPClient(ctx), o, exchange)
+	req, err := retryablehttp.NewRequestWithContext(ctx, "GET", "https://api.vk.com/method/users.get?fields=photo_200,nickname,bdate,sex&access_token="+exchange.AccessToken+"&v=5.103", nil)
 	if err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("%s", err))
+		return nil, errors.WithStack(herodot.ErrInternalServerError.WithWrap(err).WithReasonf("%s", err))
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("%s", err))
+		return nil, errors.WithStack(herodot.ErrUpstreamError.WithWrap(err).WithReasonf("%s", err))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := logUpstreamError(g.reg.Logger(), resp); err != nil {
+		return nil, err
+	}
 
 	type User struct {
 		Id        int    `json:"id,omitempty"`
@@ -81,7 +89,7 @@ func (g *ProviderVK) Claims(ctx context.Context, exchange *oauth2.Token, query u
 		LastName  string `json:"last_name,omitempty"`
 		Nickname  string `json:"nickname,omitempty"`
 		Picture   string `json:"photo_200,omitempty"`
-		Email     string
+		Email     string `json:"-"`
 		Gender    int    `json:"sex,omitempty"`
 		BirthDay  string `json:"bdate,omitempty"`
 	}
@@ -91,13 +99,17 @@ func (g *ProviderVK) Claims(ctx context.Context, exchange *oauth2.Token, query u
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("%s", err))
+		return nil, errors.WithStack(herodot.ErrUpstreamError.WithWrap(err).WithReasonf("%s", err))
+	}
+
+	if len(response.Result) == 0 {
+		return nil, errors.WithStack(herodot.ErrUpstreamError.WithReasonf("VK did not return a user in the userinfo request."))
 	}
 
 	user := response.Result[0]
 
-	if email := exchange.Extra("email"); email != nil {
-		user.Email = email.(string)
+	if email, ok := exchange.Extra("email").(string); ok {
+		user.Email = email
 	}
 
 	gender := ""

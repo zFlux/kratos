@@ -1,4 +1,4 @@
-version: v0.7.1-alpha.1
+version: v0.13.0
 
 dsn: memory
 
@@ -11,15 +11,23 @@ serve:
     base_url: http://kratos:4434/
 
 selfservice:
-  default_browser_return_url: http://127.0.0.1:4455/
+  default_browser_return_url: http://127.0.0.1:4455/welcome
   allowed_return_urls:
     - http://127.0.0.1:4455
+    - http://localhost:19006/Callback
+    - exp://localhost:8081/--/Callback
 
   methods:
     password:
       enabled: true
+    totp:
+      config:
+        issuer: Kratos
+      enabled: true
+    lookup_secret:
+      enabled: true
     link:
-      enabled: false
+      enabled: true
     code:
       enabled: true
 
@@ -30,6 +38,7 @@ selfservice:
     settings:
       ui_url: http://127.0.0.1:4455/settings
       privileged_session_max_age: 15m
+      required_aal: highest_available
 
     recovery:
       enabled: true
@@ -39,8 +48,9 @@ selfservice:
     verification:
       enabled: true
       ui_url: http://127.0.0.1:4455/verification
+      use: code
       after:
-        default_browser_return_url: http://127.0.0.1:4455/
+        default_browser_return_url: http://127.0.0.1:4455/welcome
 
     logout:
       after:
@@ -57,6 +67,7 @@ selfservice:
         password:
           hooks:
             - hook: session
+            - hook: show_verification_ui
 
 log:
   level: debug
@@ -86,3 +97,6 @@ identity:
 courier:
   smtp:
     connection_uri: smtps://test:test@mailslurper:1025/?skip_ssl_verify=true
+
+feature_flags:
+  use_continue_with_transitions: true

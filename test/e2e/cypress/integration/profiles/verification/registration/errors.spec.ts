@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 import {
   appPrefix,
   assertVerifiableAddress,
@@ -6,8 +9,8 @@ import {
   verifyHrefPattern,
 } from "../../../../helpers"
 
-import { routes as react } from "../../../../helpers/react"
 import { routes as express } from "../../../../helpers/express"
+import { routes as react } from "../../../../helpers/react"
 
 context("Account Verification Registration Errors", () => {
   ;[
@@ -31,11 +34,13 @@ context("Account Verification Registration Errors", () => {
 
       let identity
       beforeEach(() => {
-        cy.enableVerification()
-        cy.disableRecovery()
-        cy.shortLinkLifespan()
-        cy.longVerificationLifespan()
-
+        cy.useConfig((builder) =>
+          builder
+            .enableVerification()
+            .disableRecovery()
+            .shortCodeLifespan()
+            .longVerificationLifespan(),
+        )
         cy.deleteMail()
 
         identity = gen.identityWithWebsite()
@@ -44,27 +49,26 @@ context("Account Verification Registration Errors", () => {
       })
 
       it("is unable to verify the email address if the code is no longer valid and resend the code", () => {
-        cy.shortLinkLifespan()
         cy.verifyEmailButExpired({
-          expect: { email: identity.email, password: identity.password },
+          expect: { email: identity.email },
         })
 
-        cy.longLinkLifespan()
+        cy.longCodeLifespan()
 
         cy.get(appPrefix(app) + 'input[name="email"]').should("be.empty")
         cy.get('input[name="email"]').type(identity.email)
-        cy.get('button[value="link"]').click()
-        cy.get('[data-testid="ui/message/1080001"]').should(
-          "contain.text",
-          "An email containing a verification",
-        )
+        cy.get('button[value="code"]').click()
+        cy.contains("An email containing a verification")
         cy.verifyEmail({
           expect: { email: identity.email, password: identity.password },
         })
       })
 
       it("is unable to verify the email address if the code is incorrect", () => {
-        cy.getMail().then((mail) => {
+        cy.getMail({
+          body: "Verify your account",
+          email: identity.email,
+        }).then((mail) => {
           const link = parseHtml(mail.body).querySelector("a")
 
           expect(verifyHrefPattern.test(link.href)).to.be.true

@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package oidc
 
 import (
@@ -16,15 +19,17 @@ import (
 	"github.com/slack-go/slack"
 )
 
+var _ OAuth2Provider = (*ProviderSlack)(nil)
+
 type ProviderSlack struct {
 	config *Configuration
-	reg    dependencies
+	reg    Dependencies
 }
 
 func NewProviderSlack(
 	config *Configuration,
-	reg dependencies,
-) *ProviderSlack {
+	reg Dependencies,
+) Provider {
 	return &ProviderSlack{
 		config: config,
 		reg:    reg,
@@ -69,7 +74,7 @@ func (d *ProviderSlack) Claims(ctx context.Context, exchange *oauth2.Token, quer
 	api := slack.New(exchange.AccessToken)
 	identity, err := api.GetUserIdentity()
 	if err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("%s", err))
+		return nil, errors.WithStack(herodot.ErrUpstreamError.WithWrap(err).WithReasonf("%s", err))
 	}
 
 	claims := &Claims{

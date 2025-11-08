@@ -1,9 +1,14 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package errorx
 
 import (
 	"context"
 	"net/http"
 	"net/url"
+
+	"github.com/ory/kratos/x/nosurfx"
 
 	"github.com/ory/kratos/driver/config"
 
@@ -17,7 +22,7 @@ type (
 		PersistenceProvider
 		x.LoggingProvider
 		x.WriterProvider
-		x.CSRFTokenGeneratorProvider
+		nosurfx.CSRFTokenGeneratorProvider
 		config.Provider
 	}
 
@@ -40,7 +45,7 @@ func NewManager(d managerDependencies) *Manager {
 func (m *Manager) Create(ctx context.Context, w http.ResponseWriter, r *http.Request, err error) (string, error) {
 	m.d.Logger().WithError(err).WithRequest(r).Errorf("An error occurred and is being forwarded to the error user interface.")
 
-	id, addErr := m.d.SelfServiceErrorPersister().Add(ctx, m.d.GenerateCSRFToken(r), err)
+	id, addErr := m.d.SelfServiceErrorPersister().CreateErrorContainer(ctx, m.d.GenerateCSRFToken(r), err)
 	if addErr != nil {
 		return "", addErr
 	}
@@ -61,7 +66,8 @@ func (m *Manager) Forward(ctx context.Context, w http.ResponseWriter, r *http.Re
 	to, errCreate := m.Create(ctx, w, r, err)
 	if errCreate != nil {
 		// Everything failed. Resort to standard error output.
-		m.d.Writer().WriteError(w, r, errCreate)
+		m.d.Logger().WithError(errCreate).WithRequest(r).Error("Failed to create error container.")
+		m.d.Writer().WriteError(w, r, err)
 		return
 	}
 

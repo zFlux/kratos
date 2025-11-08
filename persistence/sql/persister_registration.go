@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package sql
 
 import (
@@ -7,33 +10,35 @@ import (
 
 	"github.com/gofrs/uuid"
 
+	"github.com/ory/x/otelx"
 	"github.com/ory/x/sqlcon"
 
+	"github.com/ory/kratos/persistence/sql/update"
 	"github.com/ory/kratos/selfservice/flow/registration"
 )
 
-func (p *Persister) CreateRegistrationFlow(ctx context.Context, r *registration.Flow) error {
+func (p *Persister) CreateRegistrationFlow(ctx context.Context, r *registration.Flow) (err error) {
 	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.CreateRegistrationFlow")
-	defer span.End()
+	defer otelx.End(span, &err)
 
 	r.NID = p.NetworkID(ctx)
 	r.EnsureInternalContext()
 	return p.GetConnection(ctx).Create(r)
 }
 
-func (p *Persister) UpdateRegistrationFlow(ctx context.Context, r *registration.Flow) error {
+func (p *Persister) UpdateRegistrationFlow(ctx context.Context, r *registration.Flow) (err error) {
 	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.UpdateRegistrationFlow")
-	defer span.End()
+	defer otelx.End(span, &err)
 
 	r.EnsureInternalContext()
 	cp := *r
 	cp.NID = p.NetworkID(ctx)
-	return p.update(ctx, cp)
+	return update.Generic(ctx, p.GetConnection(ctx), p.r.Tracer(ctx).Tracer(), cp)
 }
 
-func (p *Persister) GetRegistrationFlow(ctx context.Context, id uuid.UUID) (*registration.Flow, error) {
+func (p *Persister) GetRegistrationFlow(ctx context.Context, id uuid.UUID) (_ *registration.Flow, err error) {
 	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.GetRegistrationFlow")
-	defer span.End()
+	defer otelx.End(span, &err)
 
 	var r registration.Flow
 	if err := p.GetConnection(ctx).Where("id = ? AND nid = ?",
@@ -44,19 +49,18 @@ func (p *Persister) GetRegistrationFlow(ctx context.Context, id uuid.UUID) (*reg
 	return &r, nil
 }
 
-func (p *Persister) DeleteExpiredRegistrationFlows(ctx context.Context, expiresAt time.Time, limit int) error {
-	// #nosec G201
-	err := p.GetConnection(ctx).RawQuery(fmt.Sprintf(
-		"DELETE FROM %s WHERE id in (SELECT id FROM (SELECT id FROM %s c WHERE expires_at <= ? and nid = ? ORDER BY expires_at ASC LIMIT %d ) AS s )",
-		new(registration.Flow).TableName(ctx),
-		new(registration.Flow).TableName(ctx),
-		limit,
+func (p *Persister) DeleteExpiredRegistrationFlows(ctx context.Context, expiresAt time.Time, limit int) (err error) {
+	ctx, span := p.r.Tracer(ctx).Tracer().Start(ctx, "persistence.sql.DeleteExpiredRegistrationFlows")
+	defer otelx.End(span, &err)
+	//#nosec G201 -- TableName is static
+	err = p.GetConnection(ctx).RawQuery(fmt.Sprintf(
+		"DELETE FROM %[1]s WHERE id in (SELECT id FROM (SELECT id FROM %[1]s c WHERE expires_at <= ? and nid = ? ORDER BY expires_at ASC LIMIT ?) AS s)",
+		registration.Flow{}.TableName(),
 	),
 		expiresAt,
 		p.NetworkID(ctx),
+		limit,
 	).Exec()
-	if err != nil {
-		return sqlcon.HandleError(err)
-	}
-	return nil
+
+	return sqlcon.HandleError(err)
 }

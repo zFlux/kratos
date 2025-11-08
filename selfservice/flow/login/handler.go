@@ -1,32 +1,43 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package login
 
 import (
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/gofrs/uuid"
-
-	"github.com/ory/herodot"
-	"github.com/ory/kratos/text"
-	"github.com/ory/x/stringsx"
-
-	"github.com/ory/nosurf"
-
-	"github.com/ory/kratos/identity"
-	"github.com/ory/kratos/schema"
-	"github.com/ory/kratos/ui/node"
-	"github.com/ory/x/decoderx"
-
-	"github.com/julienschmidt/httprouter"
 	"github.com/pkg/errors"
 
-	"github.com/ory/x/urlx"
-
+	"github.com/ory/herodot"
+	hydraclientgo "github.com/ory/hydra-client-go/v2"
 	"github.com/ory/kratos/driver/config"
+	"github.com/ory/kratos/hydra"
+	"github.com/ory/kratos/identity"
+	"github.com/ory/kratos/schema"
 	"github.com/ory/kratos/selfservice/errorx"
 	"github.com/ory/kratos/selfservice/flow"
+	"github.com/ory/kratos/selfservice/sessiontokenexchange"
 	"github.com/ory/kratos/session"
+	"github.com/ory/kratos/text"
+	"github.com/ory/kratos/ui/node"
 	"github.com/ory/kratos/x"
+	"github.com/ory/kratos/x/events"
+	"github.com/ory/kratos/x/nosurfx"
+	"github.com/ory/kratos/x/redir"
+	"github.com/ory/nosurf"
+	"github.com/ory/x/decoderx"
+	"github.com/ory/x/otelx"
+	"github.com/ory/x/otelx/semconv"
+	"github.com/ory/x/sqlxx"
+	"github.com/ory/x/stringsx"
+	"github.com/ory/x/urlx"
 )
 
 const (
@@ -43,14 +54,18 @@ type (
 		HookExecutorProvider
 		FlowPersistenceProvider
 		errorx.ManagementProvider
+		hydra.Provider
 		StrategyProvider
 		session.HandlerProvider
 		session.ManagementProvider
 		x.WriterProvider
-		x.CSRFTokenGeneratorProvider
-		x.CSRFProvider
+		nosurfx.CSRFTokenGeneratorProvider
+		nosurfx.CSRFProvider
+		x.TracingProvider
 		config.Provider
 		ErrorHandlerProvider
+		sessiontokenexchange.PersistenceProvider
+		x.LoggingProvider
 	}
 	HandlerProvider interface {
 		LoginHandler() *Handler
@@ -69,21 +84,21 @@ func (h *Handler) RegisterPublicRoutes(public *x.RouterPublic) {
 	h.d.CSRFHandler().IgnorePath(RouteInitAPIFlow)
 	h.d.CSRFHandler().IgnorePath(RouteSubmitFlow)
 
-	public.GET(RouteInitBrowserFlow, h.initBrowserFlow)
-	public.GET(RouteInitAPIFlow, h.initAPIFlow)
-	public.GET(RouteGetFlow, h.fetchFlow)
+	public.GET(RouteInitBrowserFlow, h.createBrowserLoginFlow)
+	public.GET(RouteInitAPIFlow, h.createNativeLoginFlow)
+	public.GET(RouteGetFlow, h.getLoginFlow)
 
-	public.POST(RouteSubmitFlow, h.submitFlow)
-	public.GET(RouteSubmitFlow, h.submitFlow)
+	public.POST(RouteSubmitFlow, h.updateLoginFlow)
+	public.GET(RouteSubmitFlow, h.updateLoginFlow)
 }
 
 func (h *Handler) RegisterAdminRoutes(admin *x.RouterAdmin) {
-	admin.GET(RouteInitBrowserFlow, x.RedirectToPublicRoute(h.d))
-	admin.GET(RouteInitAPIFlow, x.RedirectToPublicRoute(h.d))
-	admin.GET(RouteGetFlow, x.RedirectToPublicRoute(h.d))
+	admin.GET(RouteInitBrowserFlow, redir.RedirectToPublicRoute(h.d))
+	admin.GET(RouteInitAPIFlow, redir.RedirectToPublicRoute(h.d))
+	admin.GET(RouteGetFlow, redir.RedirectToPublicRoute(h.d))
 
-	admin.POST(RouteSubmitFlow, x.RedirectToPublicRoute(h.d))
-	admin.GET(RouteSubmitFlow, x.RedirectToPublicRoute(h.d))
+	admin.POST(RouteSubmitFlow, redir.RedirectToPublicRoute(h.d))
+	admin.GET(RouteSubmitFlow, redir.RedirectToPublicRoute(h.d))
 }
 
 type FlowOption func(f *Flow)
@@ -94,11 +109,37 @@ func WithFlowReturnTo(returnTo string) FlowOption {
 	}
 }
 
-func (h *Handler) NewLoginFlow(w http.ResponseWriter, r *http.Request, ft flow.Type, opts ...FlowOption) (*Flow, error) {
+func WithOrganizationID(organizationID uuid.NullUUID) FlowOption {
+	return func(f *Flow) {
+		f.OrganizationID = organizationID
+	}
+}
+
+func WithInternalContext(internalContext []byte) FlowOption {
+	return func(f *Flow) {
+		f.InternalContext = internalContext
+	}
+}
+
+func WithFormErrorMessage(messages []text.Message) FlowOption {
+	return func(f *Flow) {
+		for i := range messages {
+			f.UI.Messages.Add(&messages[i])
+		}
+	}
+}
+
+func WithIsAccountLinking() FlowOption {
+	return func(f *Flow) {
+		f.isAccountLinkingFlow = true
+	}
+}
+
+func (h *Handler) NewLoginFlow(w http.ResponseWriter, r *http.Request, ft flow.Type, opts ...FlowOption) (*Flow, *session.Session, error) {
 	conf := h.d.Config()
 	f, err := NewFlow(conf, conf.SelfServiceFlowLoginRequestLifespan(r.Context()), h.d.GenerateCSRFToken(r), r, ft)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, o := range opts {
 		o(f)
@@ -111,20 +152,37 @@ func (h *Handler) NewLoginFlow(w http.ResponseWriter, r *http.Request, ft flow.T
 	switch cs := stringsx.SwitchExact(string(f.RequestedAAL)); {
 	case cs.AddCase(string(identity.AuthenticatorAssuranceLevel1)):
 		f.RequestedAAL = identity.AuthenticatorAssuranceLevel1
+		identitySchema := ""
+		if requestedSchema := r.URL.Query().Get("identity_schema"); requestedSchema != "" {
+			identitySchema, err = conf.SelfServiceFlowIdentitySchema(r.Context(), requestedSchema)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		f.IdentitySchema = flow.IdentitySchema(identitySchema)
 	case cs.AddCase(string(identity.AuthenticatorAssuranceLevel2)):
 		f.RequestedAAL = identity.AuthenticatorAssuranceLevel2
 	default:
-		return nil, errors.WithStack(herodot.ErrBadRequest.WithReasonf("Unable to parse AuthenticationMethod Assurance Level (AAL): %s", cs.ToUnknownCaseErr()))
+		return nil, nil, errors.WithStack(herodot.ErrBadRequest.WithReasonf("Unable to parse AuthenticationMethod Assurance Level (AAL): %s", cs.ToUnknownCaseErr()))
 	}
 
 	// We assume an error means the user has no session
 	sess, err := h.d.SessionManager().FetchFromRequest(r.Context(), r)
 	if e := new(session.ErrNoActiveSessionFound); errors.As(err, &e) {
 		// No session exists yet
+		returnSessionTokenExchangeCode, _ := strconv.ParseBool(r.URL.Query().Get("return_session_token_exchange_code"))
+
+		if ft == flow.TypeAPI && returnSessionTokenExchangeCode {
+			e, err := h.d.SessionTokenExchangePersister().CreateSessionTokenExchanger(r.Context(), f.ID)
+			if err != nil {
+				return nil, nil, errors.WithStack(err)
+			}
+			f.SessionTokenExchangeCode = e.InitCode
+		}
 
 		// We can not request an AAL > 1 because we must first verify the first factor.
 		if f.RequestedAAL > identity.AuthenticatorAssuranceLevel1 {
-			return nil, errors.WithStack(ErrSessionRequiredForHigherAAL)
+			return nil, nil, errors.WithStack(ErrSessionRequiredForHigherAAL)
 		}
 
 		// We are setting refresh to false if no session exists.
@@ -133,7 +191,7 @@ func (h *Handler) NewLoginFlow(w http.ResponseWriter, r *http.Request, ft flow.T
 		goto preLoginHook
 	} else if err != nil {
 		// Some other error happened - return that one.
-		return nil, err
+		return nil, nil, err
 	} else {
 		// A session exists already
 		if f.Refresh {
@@ -145,13 +203,13 @@ func (h *Handler) NewLoginFlow(w http.ResponseWriter, r *http.Request, ft flow.T
 
 		// If level is 1 we are not requesting AAL -> we are logged in already.
 		if f.RequestedAAL == identity.AuthenticatorAssuranceLevel1 {
-			return nil, errors.WithStack(ErrAlreadyLoggedIn)
+			return nil, sess, errors.WithStack(ErrAlreadyLoggedIn)
 		}
 
 		// We are requesting an assurance level which the session already has. So we are not upgrading the session
 		// in which case we want to return an error.
 		if f.RequestedAAL <= sess.AuthenticatorAssuranceLevel {
-			return nil, errors.WithStack(ErrAlreadyLoggedIn)
+			return nil, sess, errors.WithStack(ErrAlreadyLoggedIn)
 		}
 
 		// Looks like we are requesting an AAL which is higher than what the session has.
@@ -159,6 +217,43 @@ func (h *Handler) NewLoginFlow(w http.ResponseWriter, r *http.Request, ft flow.T
 	}
 
 preLoginHook:
+	for _, s := range h.d.LoginStrategies(r.Context(), PrepareOrganizations(r, f, sess)...) {
+		var populateErr error
+
+		switch strategy := s.(type) {
+		case FormHydrator:
+			switch f.RequestedAAL {
+			case identity.AuthenticatorAssuranceLevel1:
+				switch {
+				case f.IsRefresh() && sess != nil:
+					// Refreshing takes precedence over identifier_first auth which can not be a refresh flow.
+					// Therefor this comes first.
+					populateErr = strategy.PopulateLoginMethodFirstFactorRefresh(r, f, sess)
+				case h.d.Config().SelfServiceLoginFlowIdentifierFirstEnabled(r.Context()) && !f.isAccountLinkingFlow:
+					populateErr = strategy.PopulateLoginMethodIdentifierFirstIdentification(r, f)
+				default:
+					populateErr = strategy.PopulateLoginMethodFirstFactor(r, f)
+				}
+			case identity.AuthenticatorAssuranceLevel2:
+				switch {
+				case f.IsRefresh():
+					// Refresh takes precedence.
+					populateErr = strategy.PopulateLoginMethodSecondFactorRefresh(r, f)
+				default:
+					populateErr = strategy.PopulateLoginMethodSecondFactor(r, f)
+				}
+			}
+		case UnifiedFormHydrator:
+			populateErr = strategy.PopulateLoginMethod(r, f.RequestedAAL, f)
+		default:
+			populateErr = errors.WithStack(x.PseudoPanic.WithReasonf("A login strategy was expected to implement one of the interfaces UnifiedFormHydrator or FormHydrator but did not."))
+		}
+
+		if populateErr != nil {
+			return nil, nil, populateErr
+		}
+	}
+
 	if f.Refresh {
 		f.UI.Messages.Set(text.NewInfoLoginReAuth())
 	}
@@ -167,15 +262,8 @@ preLoginHook:
 		f.UI.Messages.Add(text.NewInfoLoginMFA())
 	}
 
-	var s Strategy
-	for _, s = range h.d.LoginStrategies(r.Context()) {
-		if err := s.PopulateLoginMethod(r, f.RequestedAAL, f); err != nil {
-			return nil, err
-		}
-	}
-
 	if err := sortNodes(r.Context(), f.UI.Nodes); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if f.Type == flow.TypeBrowser {
@@ -184,29 +272,36 @@ preLoginHook:
 
 	if err := h.d.LoginHookExecutor().PreLoginHook(w, r, f); err != nil {
 		h.d.LoginFlowErrorHandler().WriteFlowError(w, r, f, node.DefaultGroup, err)
-		return f, nil
+		return f, sess, nil
 	}
 
 	if err := h.d.LoginFlowPersister().CreateLoginFlow(r.Context(), f); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return f, nil
+	span := trace.SpanFromContext(r.Context())
+	span.AddEvent(events.NewLoginInitiated(r.Context(), f.ID, ft.String(), f.Refresh, f.OrganizationID, string(f.RequestedAAL)))
+	return f, nil, nil
 }
 
 func (h *Handler) FromOldFlow(w http.ResponseWriter, r *http.Request, of Flow) (*Flow, error) {
-	nf, err := h.NewLoginFlow(w, r, of.Type)
+	nf, _, err := h.NewLoginFlow(w, r, of.Type)
 	if err != nil {
 		return nil, err
 	}
 
 	nf.RequestURL = of.RequestURL
+	nf.IdentitySchema = of.IdentitySchema
 	return nf, nil
 }
 
-// nolint:deadcode,unused
-// swagger:parameters initializeSelfServiceLoginFlowWithoutBrowser
-type initializeSelfServiceLoginFlowWithoutBrowser struct {
+// Create Native Login Flow Parameters
+//
+// swagger:parameters createNativeLoginFlow
+//
+//nolint:deadcode,unused
+//lint:ignore U1000 Used to generate Swagger and OpenAPI definitions
+type createNativeLoginFlow struct {
 	// Refresh a login session
 	//
 	// If set to true, this will refresh an existing login session by
@@ -230,13 +325,45 @@ type initializeSelfServiceLoginFlowWithoutBrowser struct {
 	//
 	// in: header
 	SessionToken string `json:"X-Session-Token"`
+
+	// EnableSessionTokenExchangeCode requests the login flow to include a code that can be used to retrieve the session token
+	// after the login flow has been completed.
+	//
+	// in: query
+	EnableSessionTokenExchangeCode bool `json:"return_session_token_exchange_code"`
+
+	// The URL to return the browser to after the flow was completed.
+	//
+	// in: query
+	ReturnTo string `json:"return_to"`
+
+	// An optional organization ID that should be used for logging this user in.
+	// This parameter is only effective in the Ory Network.
+	//
+	// required: false
+	// in: query
+	Organization string `json:"organization"`
+
+	// Via should contain the identity's credential the code should be sent to. Only relevant in aal2 flows.
+	//
+	// DEPRECATED: This field is deprecated. Please remove it from your requests. The user will now see a choice
+	// of MFA credentials to choose from to perform the second factor instead.
+	//
+	// in: query
+	Via string `json:"via"`
+
+	// An optional identity schema to use for the login flow.
+	//
+	// required: false
+	// in: query
+	IdentitySchema string `json:"identity_schema"`
 }
 
-// swagger:route GET /self-service/login/api v0alpha2 initializeSelfServiceLoginFlowWithoutBrowser
+// swagger:route GET /self-service/login/api frontend createNativeLoginFlow
 //
-// Initialize Login Flow for APIs, Services, Apps, ...
+// # Create Login Flow for Native Apps
 //
-// This endpoint initiates a login flow for API clients that do not use a browser, such as mobile devices, smart TVs, and so on.
+// This endpoint initiates a login flow for native apps that do not use a browser, such as mobile devices, smart TVs, and so on.
 //
 // If a valid provided session cookie or session token is provided, a 400 Bad Request error
 // will be returned unless the URL query parameter `?refresh=true` is set.
@@ -263,11 +390,16 @@ type initializeSelfServiceLoginFlowWithoutBrowser struct {
 //	Schemes: http, https
 //
 //	Responses:
-//	  200: selfServiceLoginFlow
-//	  400: jsonError
-//	  500: jsonError
-func (h *Handler) initAPIFlow(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	f, err := h.NewLoginFlow(w, r, flow.TypeAPI)
+//	  200: loginFlow
+//	  400: errorGeneric
+//	  default: errorGeneric
+func (h *Handler) createNativeLoginFlow(w http.ResponseWriter, r *http.Request) {
+	var err error
+	ctx, span := h.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.flow.login.createNativeLoginFlow")
+	r = r.WithContext(ctx)
+	defer otelx.End(span, &err)
+
+	f, _, err := h.NewLoginFlow(w, r, flow.TypeAPI)
 	if err != nil {
 		h.d.Writer().WriteError(w, r, err)
 		return
@@ -276,9 +408,13 @@ func (h *Handler) initAPIFlow(w http.ResponseWriter, r *http.Request, _ httprout
 	h.d.Writer().Write(w, r, f)
 }
 
-// nolint:deadcode,unused
-// swagger:parameters initializeSelfServiceLoginFlowForBrowsers
-type initializeSelfServiceLoginFlowForBrowsers struct {
+// Initialize Browser Login Flow Parameters
+//
+// swagger:parameters createBrowserLoginFlow
+//
+//nolint:deadcode,unused
+//lint:ignore U1000 Used to generate Swagger and OpenAPI definitions
+type createBrowserLoginFlow struct {
 	// Refresh a login session
 	//
 	// If set to true, this will refresh an existing login session by
@@ -311,11 +447,42 @@ type initializeSelfServiceLoginFlowForBrowsers struct {
 	// in: header
 	// name: Cookie
 	Cookies string `json:"Cookie"`
+
+	// An optional Hydra login challenge. If present, Kratos will cooperate with
+	// Ory Hydra to act as an OAuth2 identity provider.
+	//
+	// The value for this parameter comes from `login_challenge` URL Query parameter sent to your
+	// application (e.g. `/login?login_challenge=abcde`).
+	//
+	// required: false
+	// in: query
+	HydraLoginChallenge string `json:"login_challenge"`
+
+	// An optional organization ID that should be used for logging this user in.
+	// This parameter is only effective in the Ory Network.
+	//
+	// required: false
+	// in: query
+	Organization string `json:"organization"`
+
+	// Via should contain the identity's credential the code should be sent to. Only relevant in aal2 flows.
+	//
+	// DEPRECATED: This field is deprecated. Please remove it from your requests. The user will now see a choice
+	// of MFA credentials to choose from to perform the second factor instead.
+	//
+	// in: query
+	Via string `json:"via"`
+
+	// An optional identity schema to use for the login flow.
+	//
+	// required: false
+	// in: query
+	IdentitySchema string `json:"identity_schema"`
 }
 
-// swagger:route GET /self-service/login/browser v0alpha2 initializeSelfServiceLoginFlowForBrowsers
+// swagger:route GET /self-service/login/browser frontend createBrowserLoginFlow
 //
-// # Initialize Login Flow for Browsers
+// # Create Login Flow for Browsers
 //
 // This endpoint initializes a browser-based user login flow. This endpoint will set the appropriate
 // cookies and anti-CSRF measures required for browser-based flows.
@@ -333,6 +500,10 @@ type initializeSelfServiceLoginFlowForBrowsers struct {
 // - `security_csrf_violation`: Unable to fetch the flow because a CSRF violation occurred.
 // - `security_identity_mismatch`: The requested `?return_to` address is not allowed to be used. Adjust this in the configuration!
 //
+// The optional query parameter login_challenge is set when using Kratos with
+// Hydra in an OAuth2 flow. See the oauth2_provider.url configuration
+// option.
+//
 // This endpoint is NOT INTENDED for clients that do not have a browser (Chrome, Firefox, ...) as cookies are needed.
 //
 // More information can be found at [Ory Kratos User Login](https://www.ory.sh/docs/kratos/self-service/flows/user-login) and [User Registration Documentation](https://www.ory.sh/docs/kratos/self-service/flows/user-registration).
@@ -343,35 +514,110 @@ type initializeSelfServiceLoginFlowForBrowsers struct {
 //	Schemes: http, https
 //
 //	Responses:
-//	  200: selfServiceLoginFlow
+//	  200: loginFlow
 //	  303: emptyResponse
-//	  400: jsonError
-//	  500: jsonError
-func (h *Handler) initBrowserFlow(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	a, err := h.NewLoginFlow(w, r, flow.TypeBrowser)
-	if errors.Is(err, ErrAlreadyLoggedIn) {
-		returnTo, redirErr := x.SecureRedirectTo(r, h.d.Config().SelfServiceBrowserDefaultReturnTo(r.Context()),
-			x.SecureRedirectAllowSelfServiceURLs(h.d.Config().SelfPublicURL(r.Context())),
-			x.SecureRedirectAllowURLs(h.d.Config().SelfServiceBrowserAllowedReturnToDomains(r.Context())),
-		)
-		if redirErr != nil {
-			h.d.SelfServiceErrorManager().Forward(r.Context(), w, r, redirErr)
+//	  400: errorGeneric
+//	  default: errorGeneric
+func (h *Handler) createBrowserLoginFlow(w http.ResponseWriter, r *http.Request) {
+	var err error
+	ctx, span := h.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.flow.login.createBrowserLoginFlow")
+	r = r.WithContext(ctx)
+	defer otelx.End(span, &err)
+
+	var (
+		hydraLoginRequest   *hydraclientgo.OAuth2LoginRequest
+		hydraLoginChallenge sqlxx.NullString
+	)
+	if r.URL.Query().Has("login_challenge") {
+		var err error
+		hydraLoginChallenge, err = hydra.GetLoginChallengeID(h.d.Config(), r)
+		if err != nil {
+			h.d.SelfServiceErrorManager().Forward(ctx, w, r, err)
 			return
 		}
 
-		x.AcceptToRedirectOrJSON(w, r, h.d.Writer(), err, returnTo.String())
+		hydraLoginRequest, err = h.d.Hydra().GetLoginRequest(ctx, string(hydraLoginChallenge))
+		if err != nil {
+			h.d.SelfServiceErrorManager().Forward(ctx, w, r, err)
+			return
+		}
+
+		if !hydraLoginRequest.GetSkip() {
+			q := r.URL.Query()
+			q.Set("refresh", "true")
+			r.URL.RawQuery = q.Encode()
+		}
+
+		// on OAuth2 flows, we need to use the RequestURL
+		// as the ReturnTo URL.
+		// This is because a user might want to switch between
+		// different flows, such as login to registration and login to recovery.
+		// After completing a complex flow, such as recovery, we want the user
+		// to be redirected back to the original OAuth2 login flow.
+		if hydraLoginRequest.RequestUrl != "" && h.d.Config().OAuth2ProviderOverrideReturnTo(ctx) {
+			// replace the return_to query parameter
+			q := r.URL.Query()
+			q.Set("return_to", hydraLoginRequest.RequestUrl)
+			r.URL.RawQuery = q.Encode()
+		}
+	}
+
+	a, sess, err := h.NewLoginFlow(w, r, flow.TypeBrowser)
+	if errors.Is(err, ErrAlreadyLoggedIn) {
+		if hydraLoginRequest != nil {
+			if !hydraLoginRequest.GetSkip() {
+				h.d.SelfServiceErrorManager().Forward(ctx, w, r, errors.WithStack(herodot.ErrForbidden.WithReason("ErrAlreadyLoggedIn indicated we can skip login, but Hydra asked us to refresh")))
+				return
+			}
+
+			rt, err := h.d.Hydra().AcceptLoginRequest(ctx,
+				hydra.AcceptLoginRequestParams{
+					LoginChallenge:        string(hydraLoginChallenge),
+					IdentityID:            sess.IdentityID.String(),
+					SessionID:             sess.ID.String(),
+					AuthenticationMethods: sess.AMR,
+				})
+			if err != nil {
+				h.d.SelfServiceErrorManager().Forward(ctx, w, r, err)
+				return
+			}
+			returnTo, err := url.Parse(rt)
+			if err != nil {
+				h.d.SelfServiceErrorManager().Forward(ctx, w, r, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("Unable to parse URL: %s", rt)))
+				return
+			}
+			x.SendFlowCompletedAsRedirectOrJSON(w, r, h.d.Writer(), err, returnTo.String())
+			return
+		}
+
+		returnTo, redirErr := redir.SecureRedirectTo(r, h.d.Config().SelfServiceBrowserDefaultReturnTo(ctx),
+			redir.SecureRedirectAllowSelfServiceURLs(h.d.Config().SelfPublicURL(ctx)),
+			redir.SecureRedirectAllowURLs(h.d.Config().SelfServiceBrowserAllowedReturnToDomains(ctx)),
+		)
+		if redirErr != nil {
+			h.d.SelfServiceErrorManager().Forward(ctx, w, r, redirErr)
+			return
+		}
+
+		x.SendFlowCompletedAsRedirectOrJSON(w, r, h.d.Writer(), err, returnTo.String())
 		return
 	} else if err != nil {
-		h.d.SelfServiceErrorManager().Forward(r.Context(), w, r, err)
+		h.d.SelfServiceErrorManager().Forward(ctx, w, r, err)
 		return
 	}
 
-	x.AcceptToRedirectOrJSON(w, r, h.d.Writer(), a, a.AppendTo(h.d.Config().SelfServiceFlowLoginUI(r.Context())).String())
+	a.HydraLoginRequest = hydraLoginRequest
+
+	x.SendFlowCompletedAsRedirectOrJSON(w, r, h.d.Writer(), a, a.AppendTo(h.d.Config().SelfServiceFlowLoginUI(ctx)).String())
 }
 
-// nolint:deadcode,unused
-// swagger:parameters getSelfServiceLoginFlow
-type getSelfServiceLoginFlow struct {
+// Get Login Flow Parameters
+//
+// swagger:parameters getLoginFlow
+//
+//nolint:deadcode,unused
+//lint:ignore U1000 Used to generate Swagger and OpenAPI definitions
+type getLoginFlow struct {
 	// The Login Flow ID
 	//
 	// The value for this parameter comes from `flow` URL Query parameter sent to your
@@ -391,7 +637,7 @@ type getSelfServiceLoginFlow struct {
 	Cookies string `json:"Cookie"`
 }
 
-// swagger:route GET /self-service/login/flows v0alpha2 getSelfServiceLoginFlow
+// swagger:route GET /self-service/login/flows frontend getLoginFlow
 //
 // # Get Login Flow
 //
@@ -406,7 +652,7 @@ type getSelfServiceLoginFlow struct {
 //	```js
 //	// pseudo-code example
 //	router.get('/login', async function (req, res) {
-//	  const flow = await client.getSelfServiceLoginFlow(req.header('cookie'), req.query['flow'])
+//	  const flow = await client.getLoginFlow(req.header('cookie'), req.query['flow'])
 //
 //	  res.render('login', flow)
 //	})
@@ -425,13 +671,18 @@ type getSelfServiceLoginFlow struct {
 //	Schemes: http, https
 //
 //	Responses:
-//	  200: selfServiceLoginFlow
-//	  403: jsonError
-//	  404: jsonError
-//	  410: jsonError
-//	  500: jsonError
-func (h *Handler) fetchFlow(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	ar, err := h.d.LoginFlowPersister().GetLoginFlow(r.Context(), x.ParseUUID(r.URL.Query().Get("id")))
+//	  200: loginFlow
+//	  403: errorGeneric
+//	  404: errorGeneric
+//	  410: errorGeneric
+//	  default: errorGeneric
+func (h *Handler) getLoginFlow(w http.ResponseWriter, r *http.Request) {
+	var err error
+	ctx, span := h.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.flow.login.getLoginFlow")
+	r = r.WithContext(ctx)
+	defer otelx.End(span, &err)
+
+	ar, err := h.d.LoginFlowPersister().GetLoginFlow(ctx, x.ParseUUID(r.URL.Query().Get("id")))
 	if err != nil {
 		h.d.Writer().WriteError(w, r, err)
 		return
@@ -441,32 +692,47 @@ func (h *Handler) fetchFlow(w http.ResponseWriter, r *http.Request, _ httprouter
 	//
 	// Resolves: https://github.com/ory/kratos/issues/1282
 	if ar.Type == flow.TypeBrowser && !nosurf.VerifyToken(h.d.GenerateCSRFToken(r), ar.CSRFToken) {
-		h.d.Writer().WriteError(w, r, x.CSRFErrorReason(r, h.d))
+		h.d.Writer().WriteError(w, r, nosurfx.CSRFErrorReason(r, h.d))
 		return
 	}
 
 	if ar.ExpiresAt.Before(time.Now()) {
 		if ar.Type == flow.TypeBrowser {
-			redirectURL := flow.GetFlowExpiredRedirectURL(r.Context(), h.d.Config(), RouteInitBrowserFlow, ar.ReturnTo)
+			redirectURL := flow.GetFlowExpiredRedirectURL(ctx, h.d.Config(), RouteInitBrowserFlow, ar.ReturnTo)
 
-			h.d.Writer().WriteError(w, r, errors.WithStack(x.ErrGone.WithID(text.ErrIDSelfServiceFlowExpired).
+			h.d.Writer().WriteError(w, r, errors.WithStack(nosurfx.ErrGone.WithID(text.ErrIDSelfServiceFlowExpired).
 				WithReason("The login flow has expired. Redirect the user to the login flow init endpoint to initialize a new login flow.").
 				WithDetail("redirect_to", redirectURL.String()).
 				WithDetail("return_to", ar.ReturnTo)))
 			return
 		}
-		h.d.Writer().WriteError(w, r, errors.WithStack(x.ErrGone.WithID(text.ErrIDSelfServiceFlowExpired).
+		h.d.Writer().WriteError(w, r, errors.WithStack(nosurfx.ErrGone.WithID(text.ErrIDSelfServiceFlowExpired).
 			WithReason("The login flow has expired. Call the login flow init API endpoint to initialize a new login flow.").
-			WithDetail("api", urlx.AppendPaths(h.d.Config().SelfPublicURL(r.Context()), RouteInitAPIFlow).String())))
+			WithDetail("api", urlx.AppendPaths(h.d.Config().SelfPublicURL(ctx), RouteInitAPIFlow).String())))
 		return
+	}
+
+	if ar.OAuth2LoginChallenge != "" {
+		hlr, err := h.d.Hydra().GetLoginRequest(ctx, string(ar.OAuth2LoginChallenge))
+		if err != nil {
+			// We don't redirect back to the third party on errors because Hydra doesn't
+			// give us the 3rd party return_uri when it redirects to the login UI.
+			h.d.SelfServiceErrorManager().Forward(ctx, w, r, err)
+			return
+		}
+		ar.HydraLoginRequest = hlr
 	}
 
 	h.d.Writer().Write(w, r, ar)
 }
 
-// nolint:deadcode,unused
-// swagger:parameters submitSelfServiceLoginFlow
-type submitSelfServiceLoginFlow struct {
+// Update Login Flow Parameters
+//
+// swagger:parameters updateLoginFlow
+//
+//nolint:deadcode,unused
+//lint:ignore U1000 Used to generate Swagger and OpenAPI definitions
+type updateLoginFlow struct {
 	// The Login Flow ID
 	//
 	// The value for this parameter comes from `flow` URL Query parameter sent to your
@@ -478,7 +744,7 @@ type submitSelfServiceLoginFlow struct {
 
 	// in: body
 	// required: true
-	Body submitSelfServiceLoginFlowBody
+	Body updateLoginFlowBody
 
 	// The Session Token of the Identity performing the settings flow.
 	//
@@ -495,19 +761,15 @@ type submitSelfServiceLoginFlow struct {
 	Cookies string `json:"Cookie"`
 }
 
-// swagger:model submitSelfServiceLoginFlowBody
-// nolint:deadcode,unused
-type submitSelfServiceLoginFlowBody struct{}
+// swagger:model updateLoginFlowBody
+//
+//nolint:deadcode,unused
+//lint:ignore U1000 Used to generate Swagger and OpenAPI definitions
+type updateLoginFlowBody struct{}
 
-// swagger:route POST /self-service/login v0alpha2 submitSelfServiceLoginFlow
+// swagger:route POST /self-service/login frontend updateLoginFlow
 //
 // # Submit a Login Flow
-//
-// :::info
-//
-// This endpoint is EXPERIMENTAL and subject to potential breaking changes in the future.
-//
-// :::
 //
 // Use this endpoint to complete a login flow. This endpoint
 // behaves differently for API and browser flows.
@@ -550,26 +812,32 @@ type submitSelfServiceLoginFlowBody struct{}
 //	- Set-Cookie
 //
 //	Responses:
-//	  200: successfulSelfServiceLoginWithoutBrowser
+//	  200: successfulNativeLogin
 //	  303: emptyResponse
-//	  400: selfServiceLoginFlow
-//	  410: jsonError
-//	  422: selfServiceBrowserLocationChangeRequiredError
-//	  500: jsonError
-func (h *Handler) submitFlow(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+//	  400: loginFlow
+//	  410: errorGeneric
+//	  422: errorBrowserLocationChangeRequired
+//	  default: errorGeneric
+func (h *Handler) updateLoginFlow(w http.ResponseWriter, r *http.Request) {
+	var err error
+	ctx, span := h.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.flow.login.updateLoginFlow")
+	ctx = semconv.ContextWithAttributes(ctx, attribute.String(events.AttributeKeySelfServiceStrategyUsed.String(), "login"))
+	r = r.WithContext(ctx)
+	defer otelx.End(span, &err)
+
 	rid, err := flow.GetFlowID(r)
 	if err != nil {
 		h.d.LoginFlowErrorHandler().WriteFlowError(w, r, nil, node.DefaultGroup, err)
 		return
 	}
 
-	f, err := h.d.LoginFlowPersister().GetLoginFlow(r.Context(), rid)
+	f, err := h.d.LoginFlowPersister().GetLoginFlow(ctx, rid)
 	if err != nil {
 		h.d.LoginFlowErrorHandler().WriteFlowError(w, r, f, node.DefaultGroup, err)
 		return
 	}
 
-	sess, err := h.d.SessionManager().FetchFromRequest(r.Context(), r)
+	sess, err := h.d.SessionManager().FetchFromRequest(ctx, r)
 	if err == nil {
 		if f.Refresh {
 			// If we want to refresh, continue the login
@@ -587,7 +855,7 @@ func (h *Handler) submitFlow(w http.ResponseWriter, r *http.Request, _ httproute
 			return
 		}
 
-		http.Redirect(w, r, h.d.Config().SelfServiceBrowserDefaultReturnTo(r.Context()).String(), http.StatusSeeOther)
+		http.Redirect(w, r, h.d.Config().SelfServiceBrowserDefaultReturnTo(ctx).String(), http.StatusSeeOther)
 		return
 	} else if e := new(session.ErrNoActiveSessionFound); errors.As(err, &e) {
 		// Only failure scenario here is if we try to upgrade the session to a higher AAL without actually
@@ -629,8 +897,8 @@ continueLogin:
 			sess = session.NewInactiveSession()
 		}
 
-		method := ss.CompletedAuthenticationMethod(r.Context())
-		sess.CompletedLoginFor(method.Method, method.AAL)
+		method := ss.CompletedAuthenticationMethod(ctx)
+		sess.CompletedLoginForMethod(method)
 		i = interim
 		break
 	}
@@ -640,7 +908,7 @@ continueLogin:
 		return
 	}
 
-	if err := h.d.LoginHookExecutor().PostLoginHook(w, r, group, f, i, sess); err != nil {
+	if err := h.d.LoginHookExecutor().PostLoginHook(w, r, group, f, i, sess, ""); err != nil {
 		if errors.Is(err, ErrAddressNotVerified) {
 			h.d.LoginFlowErrorHandler().WriteFlowError(w, r, f, node.DefaultGroup, errors.WithStack(schema.NewAddressNotVerifiedError()))
 			return

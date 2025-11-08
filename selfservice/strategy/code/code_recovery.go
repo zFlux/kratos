@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package code
 
 import (
@@ -5,10 +8,13 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/pkg/errors"
+
+	"github.com/ory/kratos/selfservice/flow"
+
 	"github.com/gofrs/uuid"
 
 	"github.com/ory/herodot"
-	"github.com/ory/x/randx"
 
 	"github.com/ory/kratos/identity"
 )
@@ -21,9 +27,9 @@ const (
 )
 
 var (
-	ErrCodeNotFound          = herodot.ErrNotFound.WithReasonf("unknown recovery code")
-	ErrCodeAlreadyUsed       = herodot.ErrBadRequest.WithReasonf("recovery code was already used")
-	ErrCodeSubmittedTooOften = herodot.ErrBadRequest.WithReasonf("The recovery was submitted too often. Please try again.")
+	ErrCodeNotFound          = herodot.ErrNotFound.WithReasonf("unknown code")
+	ErrCodeAlreadyUsed       = herodot.ErrBadRequest.WithReasonf("The code was already used. Please request another code.")
+	ErrCodeSubmittedTooOften = herodot.ErrBadRequest.WithReasonf("The request was submitted too often. Please request another code.")
 )
 
 type RecoveryCode struct {
@@ -71,20 +77,25 @@ func (RecoveryCode) TableName(ctx context.Context) string {
 	return "identity_recovery_codes"
 }
 
-func (f RecoveryCode) IsExpired() bool {
-	return f.ExpiresAt.Before(time.Now())
+func (f *RecoveryCode) Validate() error {
+	if f == nil {
+		return errors.WithStack(ErrCodeNotFound)
+	}
+	if f.ExpiresAt.Before(time.Now().UTC()) {
+		return errors.WithStack(flow.NewFlowExpiredError(f.ExpiresAt))
+	}
+	if f.UsedAt.Valid {
+		return errors.WithStack(ErrCodeAlreadyUsed)
+	}
+	return nil
 }
 
-func (r RecoveryCode) WasUsed() bool {
-	return r.UsedAt.Valid
+func (f *RecoveryCode) GetHMACCode() string {
+	return f.CodeHMAC
 }
 
-func (f RecoveryCode) IsValid() bool {
-	return !f.IsExpired() && !f.WasUsed()
-}
-
-func GenerateRecoveryCode() string {
-	return randx.MustString(8, randx.Numeric)
+func (f *RecoveryCode) GetID() uuid.UUID {
+	return f.ID
 }
 
 type CreateRecoveryCodeParams struct {

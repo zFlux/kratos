@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package courier_test
 
 import (
@@ -5,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
@@ -15,8 +19,6 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"crypto/x509"
 
 	"github.com/gofrs/uuid"
 	"github.com/pkg/errors"
@@ -33,58 +35,79 @@ import (
 	gomail "github.com/ory/mail/v3"
 )
 
+func TestNewSMTPClientPreventLeak(t *testing.T) {
+	// Test for https://hackerone.com/reports/2384028
+
+	ctx := context.Background()
+	conf, reg := internal.NewFastRegistryWithMocks(t)
+
+	invalidURL := "sm<>t>p://f%oo::bar:baz@my-server:1234:122/"
+	conf.MustSet(ctx, config.ViperKeyCourierSMTPURL, invalidURL)
+	channels, err := conf.CourierChannels(ctx)
+	require.NoError(t, err)
+	require.Len(t, channels, 1)
+
+	_, err = courier.NewSMTPClient(reg, channels[0].SMTPConfig)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), invalidURL)
+}
+
 func TestNewSMTP(t *testing.T) {
 	ctx := context.Background()
 	conf, reg := internal.NewFastRegistryWithMocks(t)
 
-	setupCourier := func(stringURL string) courier.Courier {
+	setupSMTPClient := func(stringURL string) *courier.SMTPClient {
 		conf.MustSet(ctx, config.ViperKeyCourierSMTPURL, stringURL)
-		t.Logf("SMTP URL: %s", conf.CourierSMTPURL(ctx).String())
 
-		return courier.NewCourier(ctx, reg)
+		channels, err := conf.CourierChannels(ctx)
+		require.NoError(t, err)
+		require.Len(t, channels, 1)
+		c, err := courier.NewSMTPClient(reg, channels[0].SMTPConfig)
+		require.NoError(t, err)
+		return c
 	}
 
 	if testing.Short() {
 		t.SkipNow()
 	}
 
-	//Should enforce StartTLS => dialer.StartTLSPolicy = gomail.MandatoryStartTLS and dialer.SSL = false
-	smtp := setupCourier("smtp://foo:bar@my-server:1234/")
-	assert.Equal(t, smtp.SmtpDialer().StartTLSPolicy, gomail.MandatoryStartTLS, "StartTLS not enforced")
-	assert.Equal(t, smtp.SmtpDialer().SSL, false, "Implicit TLS should not be enabled")
+	// Should enforce StartTLS => dialer.StartTLSPolicy = gomail.MandatoryStartTLS and dialer.SSL = false
+	smtp := setupSMTPClient("smtp://foo:bar@my-server:1234/")
+	assert.Equal(t, smtp.StartTLSPolicy, gomail.MandatoryStartTLS, "StartTLS not enforced")
+	assert.Equal(t, smtp.SSL, false, "Implicit TLS should not be enabled")
 
-	//Should enforce TLS => dialer.SSL = true
-	smtp = setupCourier("smtps://foo:bar@my-server:1234/")
-	assert.Equal(t, smtp.SmtpDialer().SSL, true, "Implicit TLS should be enabled")
+	// Should enforce TLS => dialer.SSL = true
+	smtp = setupSMTPClient("smtps://foo:bar@my-server:1234/")
+	assert.Equal(t, smtp.SSL, true, "Implicit TLS should be enabled")
 
-	//Should allow cleartext => dialer.StartTLSPolicy = gomail.OpportunisticStartTLS and dialer.SSL = false
-	smtp = setupCourier("smtp://foo:bar@my-server:1234/?disable_starttls=true")
-	assert.Equal(t, smtp.SmtpDialer().StartTLSPolicy, gomail.OpportunisticStartTLS, "StartTLS is enforced")
-	assert.Equal(t, smtp.SmtpDialer().SSL, false, "Implicit TLS should not be enabled")
+	// Should allow cleartext => dialer.StartTLSPolicy = gomail.OpportunisticStartTLS and dialer.SSL = false
+	smtp = setupSMTPClient("smtp://foo:bar@my-server:1234/?disable_starttls=true")
+	assert.Equal(t, smtp.StartTLSPolicy, gomail.OpportunisticStartTLS, "StartTLS is enforced")
+	assert.Equal(t, smtp.SSL, false, "Implicit TLS should not be enabled")
 
-	//Test cert based SMTP client auth
-	clientCert, clientKey, err := generateTestClientCert()
+	// Test cert based SMTP client auth
+	clientCert, clientKey, err := generateTestClientCert(t)
 	require.NoError(t, err)
-	defer os.Remove(clientCert.Name())
-	defer os.Remove(clientKey.Name())
+	t.Cleanup(func() { _ = os.Remove(clientCert.Name()) })
+	t.Cleanup(func() { _ = os.Remove(clientKey.Name()) })
 
-	conf.Set(ctx, config.ViperKeyCourierSMTPClientCertPath, clientCert.Name())
-	conf.Set(ctx, config.ViperKeyCourierSMTPClientKeyPath, clientKey.Name())
+	conf.MustSet(ctx, config.ViperKeyCourierSMTPClientCertPath, clientCert.Name())
+	conf.MustSet(ctx, config.ViperKeyCourierSMTPClientKeyPath, clientKey.Name())
 
 	clientPEM, err := tls.LoadX509KeyPair(clientCert.Name(), clientKey.Name())
 	require.NoError(t, err)
 
-	smtpWithCert := setupCourier("smtps://subdomain.my-server:1234/?server_name=my-server")
-	assert.Equal(t, smtpWithCert.SmtpDialer().SSL, true, "Implicit TLS should be enabled")
-	assert.Equal(t, smtpWithCert.SmtpDialer().Host, "subdomain.my-server", "SMTP Dialer host should match")
-	assert.Equal(t, smtpWithCert.SmtpDialer().TLSConfig.ServerName, "my-server", "TLS config server name should match")
-	assert.Equal(t, smtpWithCert.SmtpDialer().TLSConfig.ServerName, "my-server", "TLS config server name should match")
-	assert.Contains(t, smtpWithCert.SmtpDialer().TLSConfig.Certificates, clientPEM, "TLS config should contain client pem")
+	smtpWithCert := setupSMTPClient("smtps://subdomain.my-server:1234/?server_name=my-server")
+	assert.Equal(t, smtpWithCert.SSL, true, "Implicit TLS should be enabled")
+	assert.Equal(t, smtpWithCert.Host, "subdomain.my-server", "SMTP Dialer host should match")
+	assert.Equal(t, smtpWithCert.TLSConfig.ServerName, "my-server", "TLS config server name should match")
+	assert.Equal(t, smtpWithCert.TLSConfig.ServerName, "my-server", "TLS config server name should match")
+	assert.Contains(t, smtpWithCert.TLSConfig.Certificates, clientPEM, "TLS config should contain client pem")
 
-	//error case: invalid client key
-	conf.Set(ctx, config.ViperKeyCourierSMTPClientKeyPath, clientCert.Name()) //mixup client key and client cert
-	smtpWithCert = setupCourier("smtps://subdomain.my-server:1234/?server_name=my-server")
-	assert.Equal(t, len(smtpWithCert.SmtpDialer().TLSConfig.Certificates), 0, "TLS config certificates should be empty")
+	// error case: invalid client key
+	require.NoError(t, conf.Set(ctx, config.ViperKeyCourierSMTPClientKeyPath, clientCert.Name())) // mixup client key and client cert
+	smtpWithCert = setupSMTPClient("smtps://subdomain.my-server:1234/?server_name=my-server")
+	assert.Equal(t, len(smtpWithCert.TLSConfig.Certificates), 0, "TLS config certificates should be empty")
 }
 
 func TestQueueEmail(t *testing.T) {
@@ -104,10 +127,18 @@ func TestQueueEmail(t *testing.T) {
 	conf.MustSet(ctx, config.ViperKeyCourierSMTPFrom, "test-stub@ory.sh")
 	reg.Logger().Level = logrus.TraceLevel
 
-	c := reg.Courier(ctx)
+	c, err := reg.Courier(ctx)
+	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	_, err = c.QueueEmail(ctx, templates.NewTestStub(reg, &templates.TestStubModel{
+		To:      "invalid-email",
+		Subject: "test-subject-1",
+		Body:    "test-body-1",
+	}))
+	require.Error(t, err)
 
 	id, err := c.QueueEmail(ctx, templates.NewTestStub(reg, &templates.TestStubModel{
 		To:      "test-recipient-1@example.org",
@@ -153,7 +184,7 @@ func TestQueueEmail(t *testing.T) {
 				return err
 			}
 
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			body, err = io.ReadAll(res.Body)
 			if err != nil {
 				return err
@@ -164,7 +195,7 @@ func TestQueueEmail(t *testing.T) {
 			}
 
 			if total := gjson.GetBytes(body, "total").Int(); total != 3 {
-				return errors.Errorf("expected to have delivered at least 3 messages but got count %d with body: %s", total, body)
+				return errors.Errorf("expected to have delivered exactly 3 messages but got count %d with body: %s", total, body)
 			}
 
 			return nil
@@ -188,12 +219,10 @@ func TestQueueEmail(t *testing.T) {
 	assert.Contains(t, string(body), `"test-stub-header2":["bar"]`)
 }
 
-func generateTestClientCert() (clientCert *os.File, clientKey *os.File, err error) {
-	var hostName *string = flag.String("host", "127.0.0.1", "Hostname to certify")
-	priv, err := rsa.GenerateKey(rand.Reader, 1024)
-	if err != nil {
-		return nil, nil, err
-	}
+func generateTestClientCert(t *testing.T) (clientCert *os.File, clientKey *os.File, err error) {
+	hostName := flag.String("host", "127.0.0.1", "Hostname to certify")
+	priv, err := rsa.GenerateKey(rand.Reader, 1024) // #nosec G403 -- test code
+	require.NoError(t, err)
 	now := time.Now()
 	certTemplate := x509.Certificate{
 		SerialNumber: big.NewInt(1234),
@@ -207,23 +236,17 @@ func generateTestClientCert() (clientCert *os.File, clientKey *os.File, err erro
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 	}
 	cert, err := x509.CreateCertificate(rand.Reader, &certTemplate, &certTemplate, &priv.PublicKey, priv)
-	if err != nil {
-		return nil, nil, err
-	}
+	require.NoError(t, err)
 	clientCert, err = os.CreateTemp("./test", "testCert")
-	if err != nil {
-		return nil, nil, err
-	}
+	require.NoError(t, err)
+	defer func() { _ = clientCert.Close() }()
 
-	pem.Encode(clientCert, &pem.Block{Type: "CERTIFICATE", Bytes: cert})
-	clientCert.Close()
+	require.NoError(t, pem.Encode(clientCert, &pem.Block{Type: "CERTIFICATE", Bytes: cert}))
 
 	clientKey, err = os.CreateTemp("./test", "testKey")
-	if err != nil {
-		return nil, nil, err
-	}
-	pem.Encode(clientKey, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
-	clientKey.Close()
+	require.NoError(t, err)
+	defer func() { _ = clientKey.Close() }()
+	require.NoError(t, pem.Encode(clientKey, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)}))
 
 	return clientCert, clientKey, nil
 }

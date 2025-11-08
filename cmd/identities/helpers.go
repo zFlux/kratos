@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package identities
 
 import (
@@ -37,7 +40,7 @@ func readIdentities(cmd *cobra.Command, args []string) (map[string]string, error
 		return rawIdentities, nil
 	}
 	for _, fn := range args {
-		fc, err := os.ReadFile(fn)
+		fc, err := os.ReadFile(fn) // #nosec G304 -- file is supplied by user
 		if err != nil {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: Could not open identity file: %s\n", fn, err)
 			return nil, cmdx.FailSilently(cmd)

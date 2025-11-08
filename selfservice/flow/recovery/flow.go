@@ -1,13 +1,19 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package recovery
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"time"
 
-	"github.com/gobuffalo/pop/v6"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ory/kratos/x/redir"
+
+	"github.com/ory/pop/v6"
 
 	"github.com/gofrs/uuid"
 	"github.com/pkg/errors"
@@ -16,6 +22,7 @@ import (
 	"github.com/ory/kratos/selfservice/flow"
 	"github.com/ory/kratos/ui/container"
 	"github.com/ory/kratos/x"
+	"github.com/ory/x/otelx/semconv"
 	"github.com/ory/x/sqlxx"
 	"github.com/ory/x/urlx"
 )
@@ -26,7 +33,7 @@ import (
 //
 // We recommend reading the [Account Recovery Documentation](../self-service/flows/password-reset-account-recovery)
 //
-// swagger:model selfServiceRecoveryFlow
+// swagger:model recoveryFlow
 type Flow struct {
 	// ID represents the request's unique ID. When performing the recovery flow, this
 	// represents the id in the recovery ui's query parameter: http://<selfservice.flows.recovery.ui_url>?request=<id>
@@ -97,7 +104,17 @@ type Flow struct {
 	// This is needed, because we can not enforce these measures, if the flow has been initialized by someone else than
 	// the user.
 	DangerousSkipCSRFCheck bool `json:"-" faker:"-" db:"skip_csrf_check"`
+
+	// Contains possible actions that could follow this flow
+	ContinueWith []flow.ContinueWith `json:"continue_with,omitempty" faker:"-" db:"-"`
+
+	// TransientPayload is used to pass data from the recovery flow to hooks and email templates
+	//
+	// required: false
+	TransientPayload json.RawMessage `json:"transient_payload,omitempty" faker:"-" db:"-"`
 }
+
+var _ flow.Flow = (*Flow)(nil)
 
 func NewFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Request, strategy Strategy, ft flow.Type) (*Flow, error) {
 	now := time.Now().UTC()
@@ -105,17 +122,24 @@ func NewFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Reques
 
 	// Pre-validate the return to URL which is contained in the HTTP request.
 	requestURL := x.RequestURL(r).String()
-	_, err := x.SecureRedirectTo(r,
+	_, err := redir.SecureRedirectTo(r,
 		conf.SelfServiceBrowserDefaultReturnTo(r.Context()),
-		x.SecureRedirectUseSourceURL(requestURL),
-		x.SecureRedirectAllowURLs(conf.SelfServiceBrowserAllowedReturnToDomains(r.Context())),
-		x.SecureRedirectAllowSelfServiceURLs(conf.SelfPublicURL(r.Context())),
+		redir.SecureRedirectUseSourceURL(requestURL),
+		redir.SecureRedirectAllowURLs(conf.SelfServiceBrowserAllowedReturnToDomains(r.Context())),
+		redir.SecureRedirectAllowSelfServiceURLs(conf.SelfPublicURL(r.Context())),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	flow := &Flow{
+	state := flow.StateChooseMethod
+	if conf.ChooseRecoveryAddress(r.Context()) {
+		state = flow.StateRecoveryAwaitingAddress
+	} else {
+		trace.SpanFromContext(r.Context()).AddEvent(semconv.NewDeprecatedFeatureUsedEvent(r.Context(), "legacy_recovery_flow"))
+	}
+
+	f := &Flow{
 		ID:         id,
 		ExpiresAt:  now.Add(exp),
 		IssuedAt:   now,
@@ -124,25 +148,25 @@ func NewFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Reques
 			Method: "POST",
 			Action: flow.AppendFlowTo(urlx.AppendPaths(conf.SelfPublicURL(r.Context()), RouteSubmitFlow), id).String(),
 		},
-		State:     StateChooseMethod,
+		State:     state,
 		CSRFToken: csrf,
 		Type:      ft,
 	}
 
 	if strategy != nil {
-		flow.Active = sqlxx.NullString(strategy.RecoveryNodeGroup())
-		if err := strategy.PopulateRecoveryMethod(r, flow); err != nil {
+		f.Active = sqlxx.NullString(strategy.NodeGroup())
+		if err := strategy.PopulateRecoveryMethod(r, f); err != nil {
 			return nil, err
 		}
 	}
 
-	return flow, nil
+	return f, nil
 }
 
 func FromOldFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Request, strategy Strategy, of Flow) (*Flow, error) {
 	f := of.Type
 	// Using the same flow in the recovery/verification context can lead to using API flow in a verification/recovery email
-	if of.Type == flow.TypeAPI {
+	if of.Type == flow.TypeAPI && of.Active.String() == string(RecoveryStrategyLink) {
 		f = flow.TypeBrowser
 	}
 	nf, err := NewFlow(conf, exp, csrf, r, strategy, f)
@@ -154,25 +178,15 @@ func FromOldFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Re
 	return nf, nil
 }
 
-func (f *Flow) GetType() flow.Type {
-	return f.Type
-}
-
-func (f *Flow) GetRequestURL() string {
-	return f.RequestURL
-}
-
-func (f Flow) TableName(ctx context.Context) string {
-	return "selfservice_recovery_flows"
-}
-
-func (f Flow) GetID() uuid.UUID {
-	return f.ID
-}
-
-func (f Flow) GetNID() uuid.UUID {
-	return f.NID
-}
+func (f *Flow) GetType() flow.Type                   { return f.Type }
+func (f *Flow) GetRequestURL() string                { return f.RequestURL }
+func (Flow) TableName() string                       { return "selfservice_recovery_flows" }
+func (f Flow) GetID() uuid.UUID                      { return f.ID }
+func (f *Flow) GetUI() *container.Container          { return f.UI }
+func (f *Flow) GetState() State                      { return f.State }
+func (Flow) GetFlowName() flow.FlowName              { return flow.RecoveryFlow }
+func (f *Flow) SetState(state State)                 { f.State = state }
+func (f *Flow) GetTransientPayload() json.RawMessage { return f.TransientPayload }
 
 func (f *Flow) Valid() error {
 	if f.ExpiresAt.Before(time.Now().UTC()) {
@@ -216,6 +230,17 @@ func (f *Flow) AfterSave(*pop.Connection) error {
 	return nil
 }
 
-func (f *Flow) GetUI() *container.Container {
-	return f.UI
+func (f *Flow) ToLoggerField() map[string]any {
+	if f == nil {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"id":          f.ID.String(),
+		"return_to":   f.ReturnTo,
+		"request_url": f.RequestURL,
+		"active":      f.Active,
+		"type":        f.Type,
+		"nid":         f.NID,
+		"state":       f.State,
+	}
 }

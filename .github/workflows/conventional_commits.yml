@@ -1,3 +1,6 @@
+# AUTO-GENERATED, DO NOT EDIT!
+# Please edit the original at https://github.com/ory/meta/blob/master/templates/repository/common/.github/workflows/conventional_commits.yml
+
 name: Conventional commits
 
 # This GitHub CI Action enforces that pull request titles follow conventional commits.
@@ -21,7 +24,7 @@ jobs:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - id: config
         uses: ory/ci/conventional_commit_config@master
         with:
@@ -43,7 +46,7 @@ jobs:
             deps
             docs
           default_require_scope: false
-      - uses: amannn/action-semantic-pull-request@v4
+      - uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

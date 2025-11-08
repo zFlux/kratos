@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package cipher
 
 import (
@@ -9,19 +12,13 @@ import (
 	"github.com/ory/herodot"
 
 	"github.com/pkg/errors"
-
-	"github.com/ory/kratos/driver/config"
 )
 
 type AES struct {
-	c AESConfiguration
+	c SecretsProvider
 }
 
-type AESConfiguration interface {
-	config.Provider
-}
-
-func NewCryptAES(c AESConfiguration) *AES {
+func NewCryptAES(c SecretsProvider) *AES {
 	return &AES{c: c}
 }
 
@@ -33,12 +30,15 @@ func (a *AES) Encrypt(ctx context.Context, message []byte) (string, error) {
 		return "", nil
 	}
 
-	if len(a.c.Config().SecretsCipher(ctx)) == 0 {
-		return "", errors.WithStack(herodot.ErrInternalServerError.WithReason("Unable to encrypt message because no cipher secrets were configured."))
+	if len(a.c.SecretsCipher(ctx)) == 0 {
+		return "", errors.WithStack(herodot.ErrMisconfiguration.WithReason("Unable to encrypt message because no cipher secrets were configured."))
 	}
 
-	ciphertext, err := cryptopasta.Encrypt(message, &a.c.Config().SecretsCipher(ctx)[0])
-	return hex.EncodeToString(ciphertext), errors.WithStack(err)
+	ciphertext, err := cryptopasta.Encrypt(message, &a.c.SecretsCipher(ctx)[0])
+	if err != nil {
+		return "", errors.WithStack(herodot.ErrForbidden.WithWrap(err))
+	}
+	return hex.EncodeToString(ciphertext), nil
 }
 
 // Decrypt returns the decrypted aes data
@@ -49,14 +49,14 @@ func (a *AES) Decrypt(ctx context.Context, ciphertext string) ([]byte, error) {
 		return nil, nil
 	}
 
-	secrets := a.c.Config().SecretsCipher(ctx)
+	secrets := a.c.SecretsCipher(ctx)
 	if len(secrets) == 0 {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReason("Unable to decipher the encrypted message because no AES secrets were configured."))
+		return nil, errors.WithStack(herodot.ErrMisconfiguration.WithReason("Unable to decipher the encrypted message because no AES secrets were configured."))
 	}
 
 	decode, err := hex.DecodeString(ciphertext)
 	if err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithWrap(err))
+		return nil, errors.WithStack(herodot.ErrBadRequest.WithWrap(err))
 	}
 
 	for i := range secrets {
@@ -66,5 +66,5 @@ func (a *AES) Decrypt(ctx context.Context, ciphertext string) ([]byte, error) {
 		}
 	}
 
-	return nil, errors.WithStack(herodot.ErrInternalServerError.WithReason("Unable to decipher the encrypted message."))
+	return nil, errors.WithStack(herodot.ErrForbidden.WithReason("Unable to decipher the encrypted message."))
 }

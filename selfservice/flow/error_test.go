@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package flow
 
 import (
@@ -49,6 +52,17 @@ type testFlow struct {
 	//
 	// required: true
 	UI *container.Container `json:"ui" db:"ui"`
+
+	// Flow State
+	//
+	// The state represents the state of the verification flow.
+	//
+	// - choose_method: ask the user to choose a method (e.g. recover account via email)
+	// - sent_email: the email has been sent to the user
+	// - passed_challenge: the request was successful and the recovery challenge was passed.
+	//
+	// required: true
+	State State `json:"state" db:"state"`
 }
 
 func (t *testFlow) GetID() uuid.UUID {
@@ -69,6 +83,22 @@ func (t *testFlow) AppendTo(url *url.URL) *url.URL {
 
 func (t *testFlow) GetUI() *container.Container {
 	return t.UI
+}
+
+func (t *testFlow) GetState() State {
+	return t.State
+}
+
+func (t *testFlow) GetFlowName() FlowName {
+	return FlowName("test")
+}
+
+func (t *testFlow) SetState(state State) {
+	t.State = state
+}
+
+func (t *testFlow) GetTransientPayload() json.RawMessage {
+	return nil
 }
 
 func newTestFlow(r *http.Request, flowType Type) Flow {

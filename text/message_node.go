@@ -1,9 +1,44 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package text
 
 func NewInfoNodeLabelVerifyOTP() *Message {
 	return &Message{
 		ID:   InfoNodeLabelVerifyOTP,
 		Text: "Verify code",
+		Type: Info,
+	}
+}
+
+func NewInfoNodeLabelVerificationCode() *Message {
+	return &Message{
+		ID:   InfoNodeLabelVerificationCode,
+		Text: "Verification code",
+		Type: Info,
+	}
+}
+
+func NewInfoNodeLabelRecoveryCode() *Message {
+	return &Message{
+		ID:   InfoNodeLabelRecoveryCode,
+		Text: "Recovery code",
+		Type: Info,
+	}
+}
+
+func NewInfoNodeLabelRegistrationCode() *Message {
+	return &Message{
+		ID:   InfoNodeLabelRegistrationCode,
+		Text: "Registration code",
+		Type: Info,
+	}
+}
+
+func NewInfoNodeLabelLoginCode() *Message {
+	return &Message{
+		ID:   InfoNodeLabelLoginCode,
+		Text: "Login code",
 		Type: Info,
 	}
 }
@@ -16,11 +51,15 @@ func NewInfoNodeInputPassword() *Message {
 	}
 }
 
-func NewInfoNodeLabelGenerated(title string) *Message {
+func NewInfoNodeLabelGenerated(title string, name string) *Message {
 	return &Message{
 		ID:   InfoNodeLabelGenerated,
 		Text: title,
 		Type: Info,
+		Context: context(map[string]any{
+			"title": title,
+			"name":  name,
+		}),
 	}
 }
 
@@ -36,6 +75,14 @@ func NewInfoNodeLabelSubmit() *Message {
 	return &Message{
 		ID:   InfoNodeLabelSubmit,
 		Text: "Submit",
+		Type: Info,
+	}
+}
+
+func NewInfoNodeLabelContinue() *Message {
+	return &Message{
+		ID:   InfoNodeLabelContinue,
+		Text: "Continue",
 		Type: Info,
 	}
 }
@@ -56,10 +103,26 @@ func NewInfoNodeInputEmail() *Message {
 	}
 }
 
+func NewInfoNodeInputPhoneNumber() *Message {
+	return &Message{
+		ID:   InfoNodeLabelPhoneNumber,
+		Text: "Phone number",
+		Type: Info,
+	}
+}
+
 func NewInfoNodeResendOTP() *Message {
 	return &Message{
-		ID:   InfoNodeLabelEmail,
+		ID:   InfoNodeLabelResendOTP,
 		Text: "Resend code",
+		Type: Info,
+	}
+}
+
+func NewInfoNodeLoginAndLinkCredential() *Message {
+	return &Message{
+		ID:   InfoNodeLabelLoginAndLinkCredential,
+		Text: "Login and link credential",
 		Type: Info,
 	}
 }

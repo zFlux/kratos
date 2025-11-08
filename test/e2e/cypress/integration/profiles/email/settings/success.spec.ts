@@ -1,4 +1,7 @@
-import { APP_URL, appPrefix, gen, website } from "../../../../helpers"
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
+import { appPrefix, gen, website } from "../../../../helpers"
 import { routes as express } from "../../../../helpers/express"
 import { routes as react } from "../../../../helpers/react"
 
@@ -21,10 +24,13 @@ context("Settings success with email profile", () => {
   ].forEach(({ route, profile, app, base, login }) => {
     describe(`for app ${app}`, () => {
       let email = gen.email()
-      let password = gen.password()
+      const firstPassword = gen.password()
+      const secondPassword = gen.password()
+      const thirdPassword = gen.password()
+      let password = firstPassword
 
-      const up = (value) => `not-${value}`
-      const down = (value) => value.replace(/not-/, "")
+      const up = (value: string) => `not-${value}`
+      const down = (value: string) => value.replace(/not-/, "")
 
       before(() => {
         cy.useConfigProfile(profile)
@@ -37,7 +43,7 @@ context("Settings success with email profile", () => {
       })
 
       beforeEach(() => {
-        cy.clearAllCookies()
+        cy.deleteMail()
         cy.login({ email, password, cookieUrl: base })
         cy.visit(route)
       })
@@ -57,36 +63,34 @@ context("Settings success with email profile", () => {
           cy.get('input[name="password"]').clear().type("123")
           cy.get('button[value="password"]').click()
           cy.get('[data-testid="ui/message/1050001"]').should("not.exist")
-          cy.get('[data-testid="ui/message/4000005"]').should("exist")
+          cy.get('[data-testid="ui/message/4000032"]').should("exist")
           cy.get('input[name="password"]').should("be.empty")
 
-          password = up(password)
-          cy.get('input[name="password"]').clear().type(password)
+          password = secondPassword
+          cy.get('input[name="password"]').clear().type(secondPassword)
           cy.get('button[value="password"]').click()
           cy.expectSettingsSaved()
-          cy.get('[data-testid="ui/message/4000005"]').should("not.exist")
+          cy.get('[data-testid="ui/message/4000032"]').should("not.exist")
+          cy.get('[data-testid="ui/message/1050001"]').should("exist")
           cy.get('input[name="password"]').should("be.empty")
         })
 
         it("is unable to log in with the old password", () => {
-          cy.visit(base)
-          cy.clearAllCookies()
-          cy.visit(login)
           cy.login({
             email: email,
-            password: down(password),
+            password: firstPassword,
             expectSession: false,
             cookieUrl: base,
           })
         })
 
         it("modifies the password with an unprivileged session", () => {
-          password = up(password)
+          password = thirdPassword
           cy.get('input[name="password"]').clear().type(password)
           cy.shortPrivilegedSessionTime() // wait for the privileged session to time out
           cy.get('button[value="password"]').click()
 
-          cy.reauth({ expect: { email }, type: { password: down(password) } })
+          cy.reauth({ expect: { email }, type: { password: secondPassword } })
 
           cy.url().should("include", "/settings")
           cy.expectSettingsSaved()
@@ -129,6 +133,7 @@ context("Settings success with email profile", () => {
 
         it("modifies a protected trait with privileged session", () => {
           email = up(email)
+          cy.disableVerification()
           cy.get('input[name="traits.email"]').clear().type(email)
           cy.get('button[value="profile"]').click()
           cy.expectSettingsSaved()
@@ -136,9 +141,6 @@ context("Settings success with email profile", () => {
         })
 
         it("is unable to log in with the old email", () => {
-          cy.visit(base)
-          cy.clearAllCookies()
-          cy.visit(login)
           cy.login({
             email: down(email),
             password,
@@ -159,6 +161,27 @@ context("Settings success with email profile", () => {
           cy.expectSettingsSaved()
           cy.get('input[name="traits.email"]').should("contain.value", email)
         })
+
+        if (app === "react") {
+          it("shows verification screen after email update", () => {
+            cy.deleteMail()
+            cy.enableVerification()
+            email = up(email)
+            cy.get('input[name="traits.email"]').clear().type(email)
+            cy.get('button[value="profile"]').click()
+
+            cy.url().should("contain", "verification")
+            cy.getVerificationCodeFromEmail(email).then((code) => {
+              cy.get("input[name=code]").type(code)
+              cy.get("button[name=method][value=code]").click()
+            })
+
+            cy.get('[data-testid="ui/message/1080002"]').should(
+              "have.text",
+              "You successfully verified your email address.",
+            )
+          })
+        }
       })
     })
   })

@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package totp_test
 
 import (
@@ -9,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ory/kratos/x/nosurfx"
+
 	"github.com/gofrs/uuid"
 
 	"github.com/ory/kratos/selfservice/flow"
@@ -16,7 +21,7 @@ import (
 	"github.com/pquerna/otp"
 	stdtotp "github.com/pquerna/otp/totp"
 
-	kratos "github.com/ory/kratos-client-go"
+	kratos "github.com/ory/kratos/internal/httpclient"
 	"github.com/ory/kratos/selfservice/strategy/totp"
 	"github.com/ory/kratos/ui/node"
 
@@ -45,8 +50,8 @@ func TestCompleteSettings(t *testing.T) {
 	conf.MustSet(ctx, config.ViperKeySelfServiceStrategyConfig+"."+string(identity.CredentialsTypeTOTP), map[string]interface{}{"enabled": true})
 	conf.MustSet(ctx, config.ViperKeySelfServiceSettingsRequiredAAL, "aal1")
 
-	router := x.NewRouterPublic()
-	publicTS, _ := testhelpers.NewKratosServerWithRouters(t, reg, router, x.NewRouterAdmin())
+	router := x.NewRouterPublic(reg)
+	publicTS, _ := testhelpers.NewKratosServerWithRouters(t, reg, router, x.NewRouterAdmin(reg))
 
 	errTS := testhelpers.NewErrorTestServer(t, reg)
 	uiTS := testhelpers.NewSettingsUIFlowEchoServer(t, reg)
@@ -61,7 +66,7 @@ func TestCompleteSettings(t *testing.T) {
 	t.Run("case=device unlinking is available when identity has totp", func(t *testing.T) {
 		id, _, _ := createIdentity(t, reg)
 
-		apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, reg, id)
+		apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, ctx, reg, id)
 		f := testhelpers.InitializeSettingsFlowViaAPI(t, apiClient, publicTS)
 		testhelpers.SnapshotTExcept(t, f.Ui.Nodes, []string{
 			"0.attributes.value",
@@ -73,7 +78,7 @@ func TestCompleteSettings(t *testing.T) {
 		id.Credentials = nil
 		require.NoError(t, reg.PrivilegedIdentityPool().UpdateIdentity(context.Background(), id))
 
-		apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, reg, id)
+		apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, ctx, reg, id)
 		f := testhelpers.InitializeSettingsFlowViaAPI(t, apiClient, publicTS)
 		testhelpers.SnapshotTExcept(t, f.Ui.Nodes, []string{
 			"0.attributes.value",
@@ -84,7 +89,7 @@ func TestCompleteSettings(t *testing.T) {
 	})
 
 	doAPIFlow := func(t *testing.T, v func(url.Values), id *identity.Identity) (string, *http.Response) {
-		apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, reg, id)
+		apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, ctx, reg, id)
 		f := testhelpers.InitializeSettingsFlowViaAPI(t, apiClient, publicTS)
 		values := testhelpers.SDKFormFieldsToURLValues(f.Ui.Nodes)
 		values.Set("method", "totp")
@@ -94,7 +99,7 @@ func TestCompleteSettings(t *testing.T) {
 	}
 
 	doBrowserFlow := func(t *testing.T, spa bool, v func(url.Values), id *identity.Identity) (string, *http.Response) {
-		browserClient := testhelpers.NewHTTPClientWithIdentitySessionCookie(t, reg, id)
+		browserClient := testhelpers.NewHTTPClientWithIdentitySessionCookie(t, ctx, reg, id)
 		f := testhelpers.InitializeSettingsFlowViaBrowser(t, browserClient, spa, publicTS)
 		values := testhelpers.SDKFormFieldsToURLValues(f.Ui.Nodes)
 		values.Set("method", "totp")
@@ -124,7 +129,7 @@ func TestCompleteSettings(t *testing.T) {
 			}, id)
 
 			assert.Contains(t, res.Request.URL.String(), errTS.URL)
-			assert.Equal(t, x.ErrInvalidCSRFToken.Reason(), gjson.Get(body, "reason").String(), body)
+			assert.Equal(t, nosurfx.ErrInvalidCSRFToken.Reason(), gjson.Get(body, "reason").String(), body)
 		})
 
 		t.Run("type=spa", func(t *testing.T) {
@@ -134,7 +139,7 @@ func TestCompleteSettings(t *testing.T) {
 			}, id)
 
 			assert.Contains(t, res.Request.URL.String(), publicTS.URL+settings.RouteSubmitFlow)
-			assert.Equal(t, x.ErrInvalidCSRFToken.Reason(), gjson.Get(body, "error.reason").String(), body)
+			assert.Equal(t, nosurfx.ErrInvalidCSRFToken.Reason(), gjson.Get(body, "error.reason").String(), body)
 		})
 	})
 
@@ -145,7 +150,7 @@ func TestCompleteSettings(t *testing.T) {
 		})
 
 		id, _, key := createIdentity(t, reg)
-		var payload = func(v url.Values) {
+		payload := func(v url.Values) {
 			v.Set("totp_unlink", "true")
 		}
 
@@ -187,7 +192,7 @@ func TestCompleteSettings(t *testing.T) {
 		})
 
 		id := createIdentityWithoutTOTP(t, reg)
-		var payload = func(v url.Values) {
+		payload := func(v url.Values) {
 			v.Set(node.TOTPCode, "111111")
 		}
 
@@ -222,7 +227,7 @@ func TestCompleteSettings(t *testing.T) {
 	})
 
 	t.Run("type=unlink TOTP device", func(t *testing.T) {
-		var payload = func(v url.Values) {
+		payload := func(v url.Values) {
 			v.Set("totp_unlink", "true")
 		}
 
@@ -236,8 +241,9 @@ func TestCompleteSettings(t *testing.T) {
 			actual, res := doAPIFlow(t, payload, id)
 			assert.Equal(t, http.StatusOK, res.StatusCode)
 			assert.Contains(t, res.Request.URL.String(), publicTS.URL+settings.RouteSubmitFlow)
-			assert.EqualValues(t, settings.StateSuccess, gjson.Get(actual, "state").String(), actual)
+			assert.EqualValues(t, flow.StateSuccess, gjson.Get(actual, "state").String(), actual)
 			checkIdentity(t, id)
+			assert.Empty(t, gjson.Get(actual, "continue_with").Array(), "%s", actual)
 		})
 
 		t.Run("type=spa", func(t *testing.T) {
@@ -245,8 +251,11 @@ func TestCompleteSettings(t *testing.T) {
 			actual, res := doBrowserFlow(t, true, payload, id)
 			assert.Equal(t, http.StatusOK, res.StatusCode)
 			assert.Contains(t, res.Request.URL.String(), publicTS.URL+settings.RouteSubmitFlow)
-			assert.EqualValues(t, settings.StateSuccess, gjson.Get(actual, "state").String(), actual)
+			assert.EqualValues(t, flow.StateSuccess, gjson.Get(actual, "state").String(), actual)
 			checkIdentity(t, id)
+
+			assert.EqualValues(t, flow.ContinueWithActionRedirectBrowserToString, gjson.Get(actual, "continue_with.0.action").String(), "%s", actual)
+			assert.Contains(t, gjson.Get(actual, "continue_with.0.redirect_browser_to").String(), uiTS.URL, "%s", actual)
 		})
 
 		t.Run("type=browser", func(t *testing.T) {
@@ -254,13 +263,14 @@ func TestCompleteSettings(t *testing.T) {
 			actual, res := doBrowserFlow(t, false, payload, id)
 			assert.Equal(t, http.StatusOK, res.StatusCode)
 			assert.Contains(t, res.Request.URL.String(), uiTS.URL)
-			assert.EqualValues(t, settings.StateSuccess, gjson.Get(actual, "state").String(), actual)
+			assert.EqualValues(t, flow.StateSuccess, gjson.Get(actual, "state").String(), actual)
 			checkIdentity(t, id)
+			assert.Empty(t, gjson.Get(actual, "continue_with").Array(), "%s", actual)
 		})
 	})
 
 	t.Run("type=set up TOTP device but code is incorrect", func(t *testing.T) {
-		var payload = func(v url.Values) {
+		payload := func(v url.Values) {
 			v.Set(node.TOTPCode, "111111")
 		}
 
@@ -301,7 +311,7 @@ func TestCompleteSettings(t *testing.T) {
 		checkIdentity := func(t *testing.T, id *identity.Identity, key string) {
 			i, cred, err := reg.PrivilegedIdentityPool().FindByCredentialsIdentifier(context.Background(), identity.CredentialsTypeTOTP, id.ID.String())
 			require.NoError(t, err)
-			var c totp.CredentialsConfig
+			var c identity.CredentialsTOTPConfig
 			require.NoError(t, json.Unmarshal(cred.Config, &c))
 			actual, err := otp.NewKeyFromURL(c.TOTPURL)
 			require.NoError(t, err)
@@ -309,7 +319,7 @@ func TestCompleteSettings(t *testing.T) {
 			assert.Contains(t, c.TOTPURL, gjson.GetBytes(i.Traits, "subject").String())
 		}
 
-		run := func(t *testing.T, isAPI, isSPA bool, id *identity.Identity, hc *http.Client, f *kratos.SelfServiceSettingsFlow) {
+		run := func(t *testing.T, isAPI, isSPA bool, id *identity.Identity, hc *http.Client, f *kratos.SettingsFlow) {
 			values := testhelpers.SDKFormFieldsToURLValues(f.Ui.Nodes)
 
 			nodes, err := json.Marshal(f.Ui.Nodes)
@@ -329,10 +339,10 @@ func TestCompleteSettings(t *testing.T) {
 
 			if isAPI || isSPA {
 				assert.Contains(t, res.Request.URL.String(), publicTS.URL+settings.RouteSubmitFlow)
-				assert.EqualValues(t, settings.StateSuccess, gjson.Get(actual, "state").String(), actual)
+				assert.EqualValues(t, flow.StateSuccess, gjson.Get(actual, "state").String(), actual)
 			} else {
 				assert.Contains(t, res.Request.URL.String(), uiTS.URL)
-				assert.EqualValues(t, settings.StateSuccess, gjson.Get(actual, "state").String(), actual)
+				assert.EqualValues(t, flow.StateSuccess, gjson.Get(actual, "state").String(), actual)
 			}
 
 			actualFlow, err := reg.SettingsFlowPersister().GetSettingsFlow(context.Background(), uuid.FromStringOrNil(f.Id))
@@ -341,12 +351,19 @@ func TestCompleteSettings(t *testing.T) {
 
 			checkIdentity(t, id, key)
 			testhelpers.EnsureAAL(t, hc, publicTS, "aal2", string(identity.CredentialsTypeTOTP))
+
+			if isSPA {
+				assert.EqualValues(t, flow.ContinueWithActionRedirectBrowserToString, gjson.Get(actual, "continue_with.0.action").String(), "%s", actual)
+				assert.Contains(t, gjson.Get(actual, "continue_with.0.redirect_browser_to").String(), uiTS.URL, "%s", actual)
+			} else {
+				assert.Empty(t, gjson.Get(actual, "continue_with").Array(), "%s", actual)
+			}
 		}
 
 		t.Run("type=api", func(t *testing.T) {
 			id := createIdentityWithoutTOTP(t, reg)
 
-			apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, reg, id)
+			apiClient := testhelpers.NewHTTPClientWithIdentitySessionToken(t, ctx, reg, id)
 			f := testhelpers.InitializeSettingsFlowViaAPI(t, apiClient, publicTS)
 
 			run(t, true, false, id, apiClient, f)
@@ -355,7 +372,7 @@ func TestCompleteSettings(t *testing.T) {
 		t.Run("type=spa", func(t *testing.T) {
 			id := createIdentityWithoutTOTP(t, reg)
 
-			user := testhelpers.NewHTTPClientWithIdentitySessionCookie(t, reg, id)
+			user := testhelpers.NewHTTPClientWithIdentitySessionCookie(t, ctx, reg, id)
 			f := testhelpers.InitializeSettingsFlowViaBrowser(t, user, true, publicTS)
 
 			run(t, false, true, id, user, f)
@@ -364,7 +381,7 @@ func TestCompleteSettings(t *testing.T) {
 		t.Run("type=browser", func(t *testing.T) {
 			id := createIdentityWithoutTOTP(t, reg)
 
-			user := testhelpers.NewHTTPClientWithIdentitySessionCookie(t, reg, id)
+			user := testhelpers.NewHTTPClientWithIdentitySessionCookie(t, ctx, reg, id)
 			f := testhelpers.InitializeSettingsFlowViaBrowser(t, user, false, publicTS)
 
 			run(t, false, false, id, user, f)

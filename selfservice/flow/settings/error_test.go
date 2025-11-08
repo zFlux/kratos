@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package settings_test
 
 import (
@@ -8,24 +11,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/uuid"
 	"github.com/pkg/errors"
 
-	"github.com/gofrs/uuid"
-
-	"github.com/ory/kratos/ui/node"
-
-	"github.com/bxcodec/faker/v3"
+	"github.com/go-faker/faker/v4"
 	"github.com/gobuffalo/httptest"
-	"github.com/julienschmidt/httprouter"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
-	"github.com/ory/x/assertx"
-	"github.com/ory/x/urlx"
-
 	"github.com/ory/herodot"
-
 	"github.com/ory/kratos/driver/config"
 	"github.com/ory/kratos/identity"
 	"github.com/ory/kratos/internal"
@@ -35,7 +31,11 @@ import (
 	"github.com/ory/kratos/selfservice/flow/settings"
 	"github.com/ory/kratos/session"
 	"github.com/ory/kratos/text"
+	"github.com/ory/kratos/ui/node"
 	"github.com/ory/kratos/x"
+	"github.com/ory/x/assertx"
+	"github.com/ory/x/contextx"
+	"github.com/ory/x/urlx"
 )
 
 func TestHandleError(t *testing.T) {
@@ -45,12 +45,12 @@ func TestHandleError(t *testing.T) {
 
 	public, _ := testhelpers.NewKratosServer(t, reg)
 
-	router := httprouter.New()
+	router := http.NewServeMux()
 	ts := httptest.NewServer(router)
 	t.Cleanup(ts.Close)
 
 	_ = testhelpers.NewSettingsUIFlowEchoServer(t, reg)
-	errorTS := testhelpers.NewErrorTestServer(t, reg)
+	_ = testhelpers.NewErrorTestServer(t, reg)
 	loginTS := testhelpers.NewLoginUIFlowEchoServer(t, reg)
 
 	h := reg.SettingsFlowErrorHandler()
@@ -65,8 +65,13 @@ func TestHandleError(t *testing.T) {
 	id.State = identity.StateActive
 	require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &id))
 
-	router.GET("/error", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		h.WriteFlowError(w, r, flowMethod, settingsFlow, &id, flowError)
+	router.HandleFunc("GET /error", func(w http.ResponseWriter, r *http.Request) {
+		h.WriteFlowError(ctx, w, r, flowMethod, settingsFlow, &id, flowError)
+	})
+
+	router.HandleFunc("GET /fake-redirect", func(w http.ResponseWriter, r *http.Request) {
+		_, _, err := reg.LoginHandler().NewLoginFlow(w, r, flow.TypeBrowser)
+		require.NoError(t, err)
 	})
 
 	reset := func() {
@@ -81,7 +86,7 @@ func TestHandleError(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, s := range reg.SettingsStrategies(context.Background()) {
-			require.NoError(t, s.PopulateSettingsMethod(req, &id, f))
+			require.NoError(t, s.PopulateSettingsMethod(ctx, req, &id, f))
 		}
 
 		require.NoError(t, reg.SettingsFlowPersister().CreateSettingsFlow(context.Background(), f))
@@ -91,10 +96,10 @@ func TestHandleError(t *testing.T) {
 	expectErrorUI := func(t *testing.T) (map[string]interface{}, *http.Response) {
 		res, err := ts.Client().Get(ts.URL + "/error")
 		require.NoError(t, err)
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		require.Contains(t, res.Request.URL.String(), conf.SelfServiceFlowErrorURL(ctx).String()+"?id=")
 
-		sse, _, err := sdk.V0alpha2Api.GetSelfServiceError(context.Background()).
+		sse, _, err := sdk.FrontendAPI.GetFlowError(context.Background()).
 			Id(res.Request.URL.Query().Get("id")).Execute()
 		require.NoError(t, err)
 
@@ -121,7 +126,7 @@ func TestHandleError(t *testing.T) {
 
 		res, err := ts.Client().Do(testhelpers.NewHTTPGetJSONRequest(t, ts.URL+"/error"))
 		require.NoError(t, err)
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		assert.Contains(t, res.Header.Get("Content-Type"), "application/json")
 		assert.NotContains(t, res.Request.URL.String(), conf.SelfServiceFlowErrorURL(ctx).String()+"?id=")
 
@@ -141,12 +146,12 @@ func TestHandleError(t *testing.T) {
 			t.Run("case=expired error", func(t *testing.T) {
 				t.Cleanup(reset)
 
-				req := httptest.NewRequest("GET", "/sessions/whoami", nil)
+				req := httptest.NewRequest("GET", "/sessions/whoami", nil).WithContext(contextx.WithConfigValue(ctx, config.ViperKeySessionLifespan, time.Hour))
 
 				// This needs an authenticated client in order to call the RouteGetFlow endpoint
-				s, err := session.NewActiveSession(req, &id, testhelpers.NewSessionLifespanProvider(time.Hour), time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+				s, err := testhelpers.NewActiveSession(req, reg, &id, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
 				require.NoError(t, err)
-				c := testhelpers.NewHTTPClientWithSessionToken(t, reg, s)
+				c := testhelpers.NewHTTPClientWithSessionToken(t, ctx, reg, s)
 
 				settingsFlow = newFlow(t, time.Minute, tc.t)
 				flowError = flow.NewFlowExpiredError(expiredAnHourAgo)
@@ -154,7 +159,7 @@ func TestHandleError(t *testing.T) {
 
 				res, err := c.Do(testhelpers.NewHTTPGetJSONRequest(t, ts.URL+"/error"))
 				require.NoError(t, err)
-				defer res.Body.Close()
+				defer func() { _ = res.Body.Close() }()
 				require.Contains(t, res.Request.URL.String(), ts.URL+"/error")
 
 				body, err := io.ReadAll(res.Body)
@@ -174,7 +179,7 @@ func TestHandleError(t *testing.T) {
 
 				res, err := ts.Client().Do(testhelpers.NewHTTPGetJSONRequest(t, ts.URL+"/error"))
 				require.NoError(t, err)
-				defer res.Body.Close()
+				defer func() { _ = res.Body.Close() }()
 				require.Equal(t, http.StatusBadRequest, res.StatusCode)
 
 				body, err := io.ReadAll(res.Body)
@@ -193,7 +198,7 @@ func TestHandleError(t *testing.T) {
 
 				res, err := ts.Client().Do(testhelpers.NewHTTPGetJSONRequest(t, ts.URL+"/error"))
 				require.NoError(t, err)
-				defer res.Body.Close()
+				defer func() { _ = res.Body.Close() }()
 				require.Equal(t, http.StatusOK, res.StatusCode)
 
 				body, err := io.ReadAll(res.Body)
@@ -211,7 +216,7 @@ func TestHandleError(t *testing.T) {
 
 				res, err := ts.Client().Do(testhelpers.NewHTTPGetJSONRequest(t, ts.URL+"/error"))
 				require.NoError(t, err)
-				defer res.Body.Close()
+				defer func() { _ = res.Body.Close() }()
 				require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
 				body, err := io.ReadAll(res.Body)
@@ -229,7 +234,7 @@ func TestHandleError(t *testing.T) {
 
 				res, err := ts.Client().Do(testhelpers.NewHTTPGetJSONRequest(t, ts.URL+"/error"))
 				require.NoError(t, err)
-				defer res.Body.Close()
+				defer func() { _ = res.Body.Close() }()
 				require.Equal(t, http.StatusForbidden, res.StatusCode)
 
 				body, err := io.ReadAll(res.Body)
@@ -246,7 +251,7 @@ func TestHandleError(t *testing.T) {
 
 				res, err := ts.Client().Do(testhelpers.NewHTTPGetJSONRequest(t, ts.URL+"/error"))
 				require.NoError(t, err)
-				defer res.Body.Close()
+				defer func() { _ = res.Body.Close() }()
 				require.Equal(t, http.StatusInternalServerError, res.StatusCode)
 
 				body, err := io.ReadAll(res.Body)
@@ -260,7 +265,7 @@ func TestHandleError(t *testing.T) {
 		expectSettingsUI := func(t *testing.T) (*settings.Flow, *http.Response) {
 			res, err := ts.Client().Get(ts.URL + "/error")
 			require.NoError(t, err)
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			assert.Contains(t, res.Request.URL.String(), conf.SelfServiceFlowSettingsUI(ctx).String()+"?flow=")
 
 			sf, err := reg.SettingsFlowPersister().GetSettingsFlow(context.Background(), uuid.FromStringOrNil(res.Request.URL.Query().Get("flow")))
@@ -315,17 +320,42 @@ func TestHandleError(t *testing.T) {
 
 			settingsFlow = newFlow(t, time.Minute, flow.TypeBrowser)
 			settingsFlow.IdentityID = id.ID
-			flowError = errors.WithStack(session.NewErrAALNotSatisfied(""))
+			flowError = errors.WithStack(session.NewErrAALNotSatisfied(conf.SelfServiceFlowLoginUI(ctx).String()))
 			flowMethod = settings.StrategyProfile
 
-			res, err := ts.Client().Get(ts.URL + "/error")
+			client := &http.Client{}
+			*client = *ts.Client()
+
+			// disable redirects
+			client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			}
+
+			res, err := client.Get(ts.URL + "/error")
 			require.NoError(t, err)
-			assert.Contains(t, res.Request.URL.String(), errorTS.URL)
+
+			loc, err := res.Location()
+			require.NoError(t, err)
+
+			// we should end up at the login URL since the NewALLNotSatisfied takes in a redirect to URL.
+			assert.Contains(t, loc.String(), loginTS.URL)
+
+			// test the JSON resoponse as well
+			request, err := http.NewRequest("GET", ts.URL+"/error", nil)
+			require.NoError(t, err)
+
+			request.Header.Add("Accept", "application/json")
+
+			res, err = client.Do(request)
+			require.NoError(t, err)
+
+			// the body should contain the reason for the error
 			body := x.MustReadAll(res.Body)
 			require.NoError(t, res.Body.Close())
 
+			require.NotEmpty(t, gjson.GetBytes(body, "error.reason").String(), "%s", body)
 			// We end up at the error endpoint with an aal2 error message because ts.client has no session.
-			assert.Equal(t, "You can not requested a higher AAL (AAL2/AAL3) without an active session.", gjson.GetBytes(body, "reason").String(), "%s", body)
+			assert.Equal(t, session.NewErrAALNotSatisfied("").Reason(), gjson.GetBytes(body, "error.reason").String(), "%s", body)
 		})
 
 		t.Run("case=session old error", func(t *testing.T) {
@@ -338,7 +368,7 @@ func TestHandleError(t *testing.T) {
 
 			res, err := ts.Client().Get(ts.URL + "/error")
 			require.NoError(t, err)
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			require.Contains(t, res.Request.URL.String(), conf.GetProvider(ctx).String(config.ViperKeySelfServiceLoginUI))
 		})
 

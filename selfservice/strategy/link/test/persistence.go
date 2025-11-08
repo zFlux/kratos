@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package link
 
 import (
@@ -5,39 +8,39 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ory/kratos/internal/testhelpers"
-	"github.com/ory/kratos/persistence"
-	"github.com/ory/kratos/selfservice/strategy/link"
-	"github.com/ory/x/sqlcon"
-
-	"github.com/bxcodec/faker/v3"
+	"github.com/go-faker/faker/v4"
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ory/x/assertx"
-
 	"github.com/ory/kratos/driver/config"
 	"github.com/ory/kratos/identity"
+	"github.com/ory/kratos/internal/testhelpers"
+	"github.com/ory/kratos/persistence"
+	"github.com/ory/kratos/selfservice/flow"
 	"github.com/ory/kratos/selfservice/flow/recovery"
 	"github.com/ory/kratos/selfservice/flow/verification"
+	"github.com/ory/kratos/selfservice/strategy/link"
 	"github.com/ory/kratos/x"
+	"github.com/ory/x/assertx"
+	"github.com/ory/x/contextx"
+	"github.com/ory/x/sqlcon"
 )
 
-func TestPersister(ctx context.Context, conf *config.Config, p interface {
+func TestPersister(ctx context.Context, p interface {
 	persistence.Persister
-}) func(t *testing.T) {
+},
+) func(t *testing.T) {
 	return func(t *testing.T) {
 		nid, p := testhelpers.NewNetworkUnlessExisting(t, ctx, p)
 
-		testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
-		conf.MustSet(ctx, config.ViperKeySecretsDefault, []string{"secret-a", "secret-b"})
+		ctx := contextx.WithConfigValue(ctx, config.ViperKeySecretsDefault, []string{"secret-a", "secret-b"})
 
 		t.Run("token=recovery", func(t *testing.T) {
-
 			newRecoveryToken := func(t *testing.T, email string) (*link.RecoveryToken, *recovery.Flow) {
 				var req recovery.Flow
 				require.NoError(t, faker.FakeData(&req))
+				req.State = flow.StateChooseMethod
 				require.NoError(t, p.CreateRecoveryFlow(ctx, &req))
 
 				var i identity.Identity
@@ -103,7 +106,7 @@ func TestPersister(ctx context.Context, conf *config.Config, p interface {
 				expected, f := newRecoveryToken(t, "some-user@ory.sh")
 
 				require.NoError(t, p.CreateRecoveryToken(ctx, expected))
-				id, err := p.GetIdentity(ctx, expected.IdentityID)
+				id, err := p.GetIdentity(ctx, expected.IdentityID, identity.ExpandDefault)
 				require.NoError(t, err)
 				require.NoError(t, p.UpdateIdentity(ctx, id))
 
@@ -119,13 +122,13 @@ func TestPersister(ctx context.Context, conf *config.Config, p interface {
 					require.Error(t, err)
 				})
 			})
-
 		})
 
 		t.Run("token=verification", func(t *testing.T) {
 			newVerificationToken := func(t *testing.T, email string) (*verification.Flow, *link.VerificationToken) {
 				var f verification.Flow
 				require.NoError(t, faker.FakeData(&f))
+				f.State = flow.StateChooseMethod
 				require.NoError(t, p.CreateVerificationFlow(ctx, &f))
 
 				var i identity.Identity

@@ -1,40 +1,25 @@
-// Copyright © 2018 NAME HERE <EMAIL ADDRESS>
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
 
 package serve
 
 import (
-	"github.com/ory/kratos/driver/config"
-	"github.com/ory/x/configx"
-	"github.com/ory/x/servicelocatorx"
-
 	"github.com/spf13/cobra"
 
 	"github.com/ory/kratos/cmd/daemon"
 	"github.com/ory/kratos/driver"
+	"github.com/ory/kratos/driver/config"
+	"github.com/ory/x/configx"
 )
 
-// serveCmd represents the serve command
-func NewServeCmd(slOpts []servicelocatorx.Option, dOpts []driver.RegistryOption) (serveCmd *cobra.Command) {
+// NewServeCmd returns the serve command
+func NewServeCmd(dOpts ...driver.RegistryOption) (serveCmd *cobra.Command) {
 	serveCmd = &cobra.Command{
 		Use:   "serve",
 		Short: "Run the Ory Kratos server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			opts := configx.ConfigOptionsFromContext(ctx)
-			sl := servicelocatorx.NewOptions(slOpts...)
-			d, err := driver.New(ctx, cmd.ErrOrStderr(), sl, dOpts, append(opts, configx.WithFlags(cmd.Flags())))
+			d, err := driver.New(ctx, cmd.ErrOrStderr(), append(dOpts, driver.WithConfigOptions(configx.WithFlags(cmd.Flags())))...)
 			if err != nil {
 				return err
 			}
@@ -57,7 +42,7 @@ DON'T DO THIS IN PRODUCTION!
 				d.Logger().Warnf("Config version is '%s' but kratos runs on version '%s'", configVersion, config.Version)
 			}
 
-			return daemon.ServeAll(d, sl, nil)(cmd, args)
+			return daemon.ServeAll(d)(cmd, args)
 		},
 	}
 	configx.RegisterFlags(serveCmd.PersistentFlags())
@@ -68,6 +53,6 @@ DON'T DO THIS IN PRODUCTION!
 	return serveCmd
 }
 
-func RegisterCommandRecursive(parent *cobra.Command, slOpts []servicelocatorx.Option, dOpts []driver.RegistryOption) {
-	parent.AddCommand(NewServeCmd(slOpts, dOpts))
+func RegisterCommandRecursive(parent *cobra.Command, dOpts []driver.RegistryOption) {
+	parent.AddCommand(NewServeCmd(dOpts...))
 }

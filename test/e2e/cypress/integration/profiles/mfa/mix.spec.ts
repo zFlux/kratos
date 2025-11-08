@@ -1,7 +1,10 @@
-import { APP_URL, appPrefix, gen, website } from "../../../helpers"
-import { authenticator } from "otplib"
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
+import { appPrefix, gen, website } from "../../../helpers"
 import { routes as react } from "../../../helpers/react"
 import { routes as express } from "../../../helpers/express"
+import { TOTP } from "otpauth"
 
 context("2FA with various methods", () => {
   beforeEach(() => {
@@ -74,14 +77,18 @@ context("2FA with various methods", () => {
 
             cy.visit(settings)
             // Set up TOTP
-            let secret
+            let secret: string
             cy.get(
               appPrefix(app) + '[data-testid="node/text/totp_secret_key/text"]',
             ).then(($e) => {
               secret = $e.text().trim()
             })
             cy.get('[name="totp_code"]').then(($e) => {
-              cy.wrap($e).type(authenticator.generate(secret))
+              cy.wrap($e).type(
+                new TOTP({
+                  secret,
+                }).generate(),
+              )
             })
             cy.get('[name="method"][value="totp"]').click()
             cy.expectSettingsSaved()
@@ -93,7 +100,7 @@ context("2FA with various methods", () => {
             // Set up lookup secrets
             cy.visit(settings)
             cy.get('[name="lookup_secret_regenerate"]').click()
-            let codes
+            let codes: string[]
             cy.getLookupSecrets().then((c) => {
               codes = c
             })
@@ -117,7 +124,11 @@ context("2FA with various methods", () => {
 
             cy.visit(login + "?aal=aal2&refresh=true")
             cy.get('[name="totp_code"]').then(($e) => {
-              cy.wrap($e).type(authenticator.generate(secret))
+              cy.wrap($e).type(
+                new TOTP({
+                  secret,
+                }).generate(),
+              )
             })
 
             cy.get('[name="method"][value="totp"]').click()

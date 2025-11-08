@@ -1,6 +1,10 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 import { defineConfig } from "cypress"
 import got from "got"
 const CRI = require("chrome-remote-interface")
+
 let criPort = 0,
   criClient = null
 
@@ -12,21 +16,28 @@ export default defineConfig({
   video: true,
   videoCompression: false,
   screenshotOnRunFailure: true,
+
   e2e: {
     retries: {
       runMode: 6,
       openMode: 1,
     },
+    experimentalRunAllSpecs: true,
     videosFolder: "cypress/videos",
     screenshotsFolder: "cypress/screenshots",
-    excludeSpecPattern: "**/*snapshots.js",
+    excludeSpecPattern: ["**/*snapshots.js", "playwright/**"],
     supportFile: "cypress/support/index.js",
     specPattern: "**/*.spec.{js,ts}",
     baseUrl: "http://localhost:4455/",
     setupNodeEvents(on, config) {
-      on("before:browser:launch", (browser, args) => {
-        criPort = ensureRdpPort(args.args)
+      on("before:browser:launch", (browser, launchOptions) => {
+        criPort = ensureRdpPort(launchOptions.args)
         console.log("criPort is", criPort)
+
+        if (browser.name.includes("chrom") && browser.isHeadless) {
+          launchOptions.args.push("--headless=new")
+        }
+        return launchOptions
       })
 
       on("task", {

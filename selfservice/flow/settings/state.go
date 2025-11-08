@@ -1,4 +1,9 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package settings
+
+import "github.com/ory/kratos/selfservice/flow"
 
 // State represents the state of this flow. It knows two states:
 //
@@ -7,10 +12,5 @@ package settings
 //     Done will stay true when repeatedly checking. If set to true, done will revert back to false only
 //     when a flow with invalid (e.g. "please use a valid phone number") data was sent.
 //
-// swagger:model selfServiceSettingsFlowState
-type State string
-
-const (
-	StateShowForm State = "show_form"
-	StateSuccess  State = "success"
-)
+// swagger:model settingsFlowState
+type State = flow.State

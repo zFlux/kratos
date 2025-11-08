@@ -1,30 +1,32 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package courier
 
 import (
-	cx "context"
+	"context"
 	"net/http"
 
-	"github.com/ory/x/servicelocatorx"
-
-	"golang.org/x/sync/errgroup"
-
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 	"github.com/urfave/negroni"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/ory/graceful"
 	"github.com/ory/kratos/driver"
-	"github.com/ory/kratos/x"
 	"github.com/ory/x/configx"
 	"github.com/ory/x/otelx"
+	"github.com/ory/x/prometheusx"
 	"github.com/ory/x/reqlog"
 )
 
-func NewWatchCmd(slOpts []servicelocatorx.Option, dOpts []driver.RegistryOption) *cobra.Command {
-	var c = &cobra.Command{
+func NewWatchCmd(dOpts []driver.RegistryOption) *cobra.Command {
+	c := &cobra.Command{
 		Use:   "watch",
 		Short: "Starts the Ory Kratos message courier",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := driver.New(cmd.Context(), cmd.ErrOrStderr(), servicelocatorx.NewOptions(slOpts...), dOpts, []configx.OptionModifier{configx.WithFlags(cmd.Flags())})
+			r, err := driver.New(cmd.Context(), cmd.ErrOrStderr(), append(dOpts, driver.WithConfigOptions(configx.WithFlags(cmd.Flags())))...)
 			if err != nil {
 				return err
 			}
@@ -36,12 +38,12 @@ func NewWatchCmd(slOpts []servicelocatorx.Option, dOpts []driver.RegistryOption)
 	return c
 }
 
-func StartCourier(ctx cx.Context, r driver.Registry) error {
+func StartCourier(ctx context.Context, r driver.Registry) error {
 	eg, ctx := errgroup.WithContext(ctx)
 
-	if r.Config().CourierExposeMetricsPort(ctx) != 0 {
+	if port := r.Config().CourierExposeMetricsPort(ctx); port != 0 {
 		eg.Go(func() error {
-			return ServeMetrics(ctx, r)
+			return ServeMetrics(ctx, r, port)
 		})
 	}
 
@@ -52,62 +54,51 @@ func StartCourier(ctx cx.Context, r driver.Registry) error {
 	return eg.Wait()
 }
 
-func ServeMetrics(ctx cx.Context, r driver.Registry) error {
-	c := r.Config()
+func ServeMetrics(ctx context.Context, r driver.Registry, port int) error {
+	cfg := r.Config().ServeAdmin(ctx)
 	l := r.Logger()
 	n := negroni.New()
 
-	router := x.NewRouterAdmin()
+	router := http.NewServeMux()
 
-	r.MetricsHandler().SetRoutes(router.Router)
-	n.Use(reqlog.NewMiddlewareFromLogger(l, "admin#"+c.SelfPublicURL(ctx).String()))
-	n.Use(r.PrometheusManager())
+	router.Handle(prometheusx.MetricsPrometheusPath, promhttp.Handler())
+	n.Use(reqlog.NewMiddlewareFromLogger(l, "admin#"+cfg.BaseURL.String()))
 
 	n.UseHandler(router)
 
 	var handler http.Handler = n
 	if tracer := r.Tracer(ctx); tracer.IsLoaded() {
-		handler = otelx.NewHandler(n, "cmd.courier.ServeMetrics")
+		tp := tracer.Provider()
+		handler = otelx.NewHandler(handler, "cmd.courier.ServeMetrics", otelhttp.WithTracerProvider(tp))
 	}
 
-	// #nosec G112 - the correct settings are set by graceful.WithDefaults
+	//#nosec G112 -- the correct settings are set by graceful.WithDefaults
 	server := graceful.WithDefaults(&http.Server{
-		Addr:    c.MetricsListenOn(ctx),
+		Addr:    configx.GetAddress(cfg.Host, port),
 		Handler: handler,
 	})
 
 	l.Printf("Starting the metrics httpd on: %s", server.Addr)
-	if err := graceful.Graceful(func() error {
-		errChan := make(chan error, 1)
-		go func(errChan chan error) {
-			if err := server.ListenAndServe(); err != nil {
-				errChan <- err
-			}
-		}(errChan)
-		select {
-		case err := <-errChan:
-			l.Errorf("Failed to start the metrics httpd: %s\n", err)
-			return err
-		case <-ctx.Done():
-			l.Printf("Shutting down the metrics httpd: context closed: %s\n", ctx.Err())
-			return server.Shutdown(ctx)
-		}
-	}, server.Shutdown); err != nil {
+	if err := graceful.GracefulContext(ctx, server.ListenAndServe, server.Shutdown); err != nil {
 		l.Errorln("Failed to gracefully shutdown metrics httpd")
 		return err
-	} else {
-		l.Println("Metrics httpd was shutdown gracefully")
 	}
+	l.Println("Metrics httpd was shutdown gracefully")
 	return nil
 }
 
-func Watch(ctx cx.Context, r driver.Registry) error {
-	ctx, cancel := cx.WithCancel(ctx)
+func Watch(ctx context.Context, r driver.Registry) error {
+	ctx, cancel := context.WithCancel(ctx)
 
 	r.Logger().Println("Courier worker started.")
 	if err := graceful.Graceful(func() error {
-		return r.Courier(ctx).Work(ctx)
-	}, func(_ cx.Context) error {
+		c, err := r.Courier(ctx)
+		if err != nil {
+			return err
+		}
+
+		return c.Work(ctx)
+	}, func(_ context.Context) error {
 		cancel()
 		return nil
 	}); err != nil {

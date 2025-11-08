@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package x
 
 import (
@@ -27,7 +30,7 @@ func TestCleanPath(t *testing.T) {
 		t.Run(fmt.Sprintf("case=%d", k), func(t *testing.T) {
 			res, err := ts.Client().Get(ts.URL + tc[0])
 			require.NoError(t, err)
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			body, err := io.ReadAll(res.Body)
 			require.NoError(t, err)
 			assert.Equal(t, string(body), tc[1])

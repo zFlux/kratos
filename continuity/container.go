@@ -1,13 +1,16 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package continuity
 
 import (
-	"context"
 	"time"
 
 	"github.com/gofrs/uuid"
 	"github.com/pkg/errors"
 
 	"github.com/ory/herodot"
+	"github.com/ory/x/pointerx"
 	"github.com/ory/x/sqlxx"
 
 	"github.com/ory/kratos/x"
@@ -39,13 +42,11 @@ func (c *Container) UTC() *Container {
 	return c
 }
 
-func (c Container) TableName(ctx context.Context) string {
-	return "continuity_containers"
-}
+func (Container) TableName() string { return "continuity_containers" }
 
 func NewContainer(name string, o managerOptions) *Container {
 	return &Container{
-		ID:         x.NewUUID(),
+		ID:         uuid.Nil,
 		Name:       name,
 		IdentityID: x.PointToUUID(o.iid),
 		ExpiresAt:  time.Now().Add(o.ttl).UTC().Truncate(time.Second),
@@ -58,8 +59,8 @@ func (c *Container) Valid(identity uuid.UUID) error {
 		return errors.WithStack(herodot.ErrBadRequest.WithReasonf("You must restart the flow because the resumable session has expired."))
 	}
 
-	if identity != uuid.Nil && x.DerefUUID(c.IdentityID) != identity {
-		return errors.WithStack(herodot.ErrBadRequest.WithReasonf("You must restart the flow because the resumable session was initiated by another person."))
+	if identity != uuid.Nil && pointerx.Deref(c.IdentityID) != identity {
+		return errors.WithStack(herodot.ErrForbidden.WithReasonf("The flow has been blocked for security reasons because it was initiated by another person.."))
 	}
 
 	return nil

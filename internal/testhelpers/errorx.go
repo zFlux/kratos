@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package testhelpers
 
 import (
@@ -23,17 +26,18 @@ import (
 func NewErrorTestServer(t *testing.T, reg interface {
 	errorx.PersistenceProvider
 	config.Provider
-}) *httptest.Server {
+},
+) *httptest.Server {
 	logger := logrusx.New("", "", logrusx.ForceLevel(logrus.TraceLevel))
 	writer := herodot.NewJSONWriter(logger)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		e, err := reg.SelfServiceErrorPersister().Read(r.Context(), x.ParseUUID(r.URL.Query().Get("id")))
+		e, err := reg.SelfServiceErrorPersister().ReadErrorContainer(r.Context(), x.ParseUUID(r.URL.Query().Get("id")))
 		require.NoError(t, err)
 		t.Logf("Found error in NewErrorTestServer: %s", e.Errors)
 		writer.Write(w, r, e.Errors)
 	}))
 	t.Cleanup(ts.Close)
-	ts.URL = strings.Replace(ts.URL, "127.0.0.1", "localhost", -1)
+	ts.URL = strings.ReplaceAll(ts.URL, "127.0.0.1", "localhost")
 	reg.Config().MustSet(context.Background(), config.ViperKeySelfServiceErrorUI, ts.URL)
 	return ts
 }
@@ -55,7 +59,8 @@ func NewRedirSessionEchoTS(t *testing.T, reg interface {
 	x.WriterProvider
 	session.ManagementProvider
 	config.Provider
-}) *httptest.Server {
+},
+) *httptest.Server {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// verify that the client has a session, and echo it back
 		sess, err := reg.SessionManager().FetchFromRequest(r.Context(), r)
@@ -71,7 +76,8 @@ func NewRedirNoSessionTS(t *testing.T, reg interface {
 	x.WriterProvider
 	session.ManagementProvider
 	config.Provider
-}) *httptest.Server {
+},
+) *httptest.Server {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// verify that the client DOES NOT have a session
 		_, err := reg.SessionManager().FetchFromRequest(r.Context(), r)

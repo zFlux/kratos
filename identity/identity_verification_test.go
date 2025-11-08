@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package identity
 
 import (
@@ -31,10 +34,10 @@ func TestNewVerifiableEmailAddress(t *testing.T) {
 }
 
 var tagsIgnoredForHashing = map[string]struct{}{
-	"id":          {},
-	"created_at":  {},
-	"updated_at":  {},
-	"verified_at": {},
+	"id":         {},
+	"created_at": {},
+	"updated_at": {},
+	// "verified_at": {}, // we explicitly want to be able to update just this field and nothing else
 }
 
 func reflectiveHash(record any) string {
@@ -95,9 +98,8 @@ func TestVerifiableAddress_Hash(t *testing.T) {
 		t.Run("case="+tc.name, func(t *testing.T) {
 			assert.Equal(t,
 				reflectiveHash(tc.a),
-				tc.a.Hash(),
+				tc.a.Signature(),
 			)
 		})
 	}
-
 }

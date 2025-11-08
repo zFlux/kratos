@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package testhelpers
 
 import (
@@ -8,10 +11,13 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/bxcodec/faker/v3"
+	"github.com/gofrs/uuid"
+
+	"github.com/go-faker/faker/v4"
 	"github.com/gobuffalo/httptest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 
 	"github.com/ory/kratos/driver"
 	"github.com/ory/kratos/driver/config"
@@ -86,6 +92,7 @@ func SelfServiceHookFakeIdentity(t *testing.T) *identity.Identity {
 	require.NoError(t, faker.FakeData(&i))
 	i.Traits = identity.Traits(`{}`)
 	i.State = identity.StateActive
+	i.NID = uuid.Must(uuid.NewV4())
 	return &i
 }
 
@@ -157,7 +164,7 @@ func SelfServiceHookSettingsErrorHandler(t *testing.T, w http.ResponseWriter, r 
 	return SelfServiceHookErrorHandler(t, w, r, settings.ErrHookAbortFlow, err)
 }
 
-func SelfServiceHookErrorHandler(t *testing.T, w http.ResponseWriter, r *http.Request, abortErr error, actualErr error) bool {
+func SelfServiceHookErrorHandler(t *testing.T, w http.ResponseWriter, _ *http.Request, abortErr error, actualErr error) bool {
 	if actualErr != nil {
 		t.Logf("received error: %+v", actualErr)
 		if errors.Is(actualErr, abortErr) {
@@ -214,7 +221,7 @@ func SelfServiceMakeHookRequest(t *testing.T, ts *httptest.Server, suffix string
 	}
 	res, err := ts.Client().Do(req)
 	require.NoError(t, err)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	body, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 	return res, string(body)
@@ -230,6 +237,19 @@ func GetSelfServiceRedirectLocation(t *testing.T, url string) string {
 	require.NoError(t, err)
 	res, err := c.Do(req)
 	require.NoError(t, err)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	return res.Header.Get("Location")
+}
+
+func AssertMessage(t *testing.T, body []byte, message string) {
+	t.Helper()
+	assert.Len(t, gjson.GetBytes(body, "ui.messages").Array(), 1)
+	assert.Equal(t, message, gjson.GetBytes(body, "ui.messages.0.text").String(), "%v", string(body))
+}
+
+func AssertFieldMessage(t *testing.T, body []byte, fieldName string, message string) {
+	t.Helper()
+	messages := gjson.GetBytes(body, "ui.nodes.#(attributes.name=="+fieldName+").messages")
+	assert.Len(t, messages.Array(), 1, "expected field %s to have one message, got %s", fieldName, messages)
+	assert.Equal(t, message, messages.Get("0.text").String(), "%v", string(body))
 }

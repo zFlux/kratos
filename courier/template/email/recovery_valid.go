@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package email
 
 import (
@@ -15,9 +18,12 @@ type (
 		m *RecoveryValidModel
 	}
 	RecoveryValidModel struct {
-		To          string
-		RecoveryURL string
-		Identity    map[string]interface{}
+		To               string                 `json:"to"`
+		RecoveryURL      string                 `json:"recovery_url"`
+		Identity         map[string]interface{} `json:"identity"`
+		RequestURL       string                 `json:"request_url"`
+		TransientPayload map[string]interface{} `json:"transient_payload"`
+		ExpiresInMinutes int                    `json:"expires_in_minutes"`
 	}
 )
 
@@ -45,4 +51,8 @@ func (t *RecoveryValid) EmailBodyPlaintext(ctx context.Context) (string, error) 
 
 func (t *RecoveryValid) MarshalJSON() ([]byte, error) {
 	return json.Marshal(t.m)
+}
+
+func (t *RecoveryValid) TemplateType() template.TemplateType {
+	return template.TypeRecoveryValid
 }

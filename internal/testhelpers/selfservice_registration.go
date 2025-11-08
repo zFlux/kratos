@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package testhelpers
 
 import (
@@ -15,7 +18,7 @@ import (
 
 	"github.com/ory/x/assertx"
 
-	kratos "github.com/ory/kratos-client-go"
+	kratos "github.com/ory/kratos/internal/httpclient"
 
 	"github.com/ory/x/ioutilx"
 
@@ -39,7 +42,7 @@ func NewRegistrationUIFlowEchoServer(t *testing.T, reg driver.Registry) *httptes
 	return ts
 }
 
-func InitializeRegistrationFlowViaBrowser(t *testing.T, client *http.Client, ts *httptest.Server, isSPA bool, opts ...InitFlowWithOption) *kratos.SelfServiceRegistrationFlow {
+func InitializeRegistrationFlowViaBrowser(t *testing.T, client *http.Client, ts *httptest.Server, isSPA bool, expectInitError bool, expectGetError bool, opts ...InitFlowWithOption) *kratos.RegistrationFlow {
 	req, err := http.NewRequest("GET", getURLFromInitOptions(ts, registration.RouteInitBrowserFlow, false, opts...), nil)
 	require.NoError(t, err)
 
@@ -51,20 +54,46 @@ func InitializeRegistrationFlowViaBrowser(t *testing.T, client *http.Client, ts 
 	require.NoError(t, err)
 	body := x.MustReadAll(res.Body)
 	require.NoError(t, res.Body.Close())
+	if expectInitError {
+		require.Equal(t, 200, res.StatusCode)
+		require.NotNil(t, res.Request.URL)
+		require.Contains(t, res.Request.URL.String(), "error-ts")
+	}
 
 	flowID := res.Request.URL.Query().Get("flow")
 	if isSPA {
 		flowID = gjson.GetBytes(body, "id").String()
 	}
 
-	rs, _, err := NewSDKCustomClient(ts, client).V0alpha2Api.GetSelfServiceRegistrationFlow(context.Background()).Id(flowID).Execute()
+	rs, _, err := NewSDKCustomClient(ts, client).FrontendAPI.GetRegistrationFlow(context.Background()).Id(flowID).Execute()
+	if expectGetError {
+		require.Error(t, err)
+		require.Nil(t, rs)
+	} else {
+		require.NoError(t, err)
+		assert.Empty(t, rs.Active)
+	}
+	return rs
+}
+
+func InitializeRegistrationFlowViaAPIExpectError(t *testing.T, client *http.Client, ts *httptest.Server, opts ...InitFlowWithOption) {
+	o := new(initFlowOptions).apply(opts)
+
+	_, _, err := NewSDKCustomClient(ts, client).FrontendAPI.CreateNativeRegistrationFlow(context.Background()).IdentitySchema(o.identitySchema).Execute()
+	require.Error(t, err)
+}
+
+func InitializeRegistrationFlowViaAPI(t *testing.T, client *http.Client, ts *httptest.Server, opts ...InitFlowWithOption) *kratos.RegistrationFlow {
+	o := new(initFlowOptions).apply(opts)
+
+	rs, _, err := NewSDKCustomClient(ts, client).FrontendAPI.CreateNativeRegistrationFlow(context.Background()).IdentitySchema(o.identitySchema).Execute()
 	require.NoError(t, err)
 	assert.Empty(t, rs.Active)
 	return rs
 }
 
-func InitializeRegistrationFlowViaAPI(t *testing.T, client *http.Client, ts *httptest.Server) *kratos.SelfServiceRegistrationFlow {
-	rs, _, err := NewSDKCustomClient(ts, client).V0alpha2Api.InitializeSelfServiceRegistrationFlowWithoutBrowser(context.Background()).Execute()
+func GetRegistrationFlow(t *testing.T, client *http.Client, ts *httptest.Server, flowID string) *kratos.RegistrationFlow {
+	rs, _, err := NewSDKCustomClient(ts, client).FrontendAPI.GetRegistrationFlow(context.Background()).Id(flowID).Execute()
 	require.NoError(t, err)
 	assert.Empty(t, rs.Active)
 	return rs
@@ -74,7 +103,7 @@ func RegistrationMakeRequest(
 	t *testing.T,
 	isAPI bool,
 	isSPA bool,
-	f *kratos.SelfServiceRegistrationFlow,
+	f *kratos.RegistrationFlow,
 	hc *http.Client,
 	values string,
 ) (string, *http.Response) {
@@ -87,7 +116,7 @@ func RegistrationMakeRequest(
 
 	res, err := hc.Do(req)
 	require.NoError(t, err)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	return string(ioutilx.MustReadAll(res.Body)), res
 }
@@ -104,17 +133,18 @@ func SubmitRegistrationForm(
 	isSPA bool,
 	expectedStatusCode int,
 	expectedURL string,
+	opts ...InitFlowWithOption,
 ) string {
 	if hc == nil {
 		hc = new(http.Client)
 	}
 
 	hc.Transport = NewTransportWithLogger(hc.Transport, t)
-	var payload *kratos.SelfServiceRegistrationFlow
+	var payload *kratos.RegistrationFlow
 	if isAPI {
-		payload = InitializeRegistrationFlowViaAPI(t, hc, publicTS)
+		payload = InitializeRegistrationFlowViaAPI(t, hc, publicTS, opts...)
 	} else {
-		payload = InitializeRegistrationFlowViaBrowser(t, hc, publicTS, isSPA)
+		payload = InitializeRegistrationFlowViaBrowser(t, hc, publicTS, isSPA, false, false, opts...)
 	}
 
 	time.Sleep(time.Millisecond) // add a bit of delay to allow `1ns` to time out.

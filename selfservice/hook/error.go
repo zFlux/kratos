@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package hook
 
 import (
@@ -57,7 +60,7 @@ func (e Error) ExecuteSettingsPrePersistHook(w http.ResponseWriter, r *http.Requ
 	return e.err("ExecuteSettingsPrePersistHook", settings.ErrHookAbortFlow)
 }
 
-func (e Error) ExecuteSettingsPostPersistHook(w http.ResponseWriter, r *http.Request, a *settings.Flow, s *identity.Identity) error {
+func (e Error) ExecuteSettingsPostPersistHook(w http.ResponseWriter, r *http.Request, a *settings.Flow, id *identity.Identity, s *session.Session) error {
 	return e.err("ExecuteSettingsPostPersistHook", settings.ErrHookAbortFlow)
 }
 

@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 export const email = () => Math.random().toString(36) + "@ory.sh"
 export const blockedEmail = () =>
   Math.random().toString(36) + "_blocked" + "@ory.sh"
@@ -34,7 +37,7 @@ export const assertRecoveryAddress =
     expect(address.value).to.equal(email)
   }
 
-export const parseHtml = (html) =>
+export const parseHtml = (html: string) =>
   new DOMParser().parseFromString(html, "text/html")
 
 export const APP_URL = (
@@ -42,7 +45,7 @@ export const APP_URL = (
 ).replace(/\/$/, "")
 
 export const MOBILE_URL = (
-  Cypress.env("mobile_url") || "http://localhost:4457"
+  Cypress.env("mobile_url") || "http://localhost:19006"
 ).replace(/\/$/, "")
 export const SPA_URL = (
   Cypress.env("react_url") || "http://localhost:4455"
@@ -79,7 +82,7 @@ export const gen = {
 
 // Format is
 export const verifyHrefPattern =
-  /^http:.*\/self-service\/verification\?(((&|)token|(&|)flow)=([\-a-zA-Z0-9]+)){2}$/
+  /^http:.*\/self-service\/verification\?(((&|)code|(&|)token|(&|)flow)=([\-a-zA-Z0-9]+)){2}$/
 
 // intervals define how long to wait for something,
 export const pollInterval = 250 // how long to wait before retry
@@ -90,8 +93,9 @@ export const privilegedLifespan = 5000 + 1000
 
 export const appPrefix = (app) => `[data-testid="app-${app}"] `
 
-export function extractRecoveryCode(body: string): string | null {
-  const codeRegex = /(\d{8})/
+export const codeRegex = /(\d{6})/
+
+export function extractOTPCode(body: string): string | null {
   const result = codeRegex.exec(body)
   if (result != null && result.length > 0) {
     return result[0]

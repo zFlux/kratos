@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package cipher
 
 import "context"
@@ -19,4 +22,8 @@ type Cipher interface {
 
 type Provider interface {
 	Cipher(ctx context.Context) Cipher
+}
+
+type SecretsProvider interface {
+	SecretsCipher(ctx context.Context) [][32]byte
 }

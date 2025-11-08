@@ -1,4 +1,6 @@
-// nolint
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package testhelpers
 
 import (
@@ -14,9 +16,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	kratos "github.com/ory/kratos-client-go"
 	"github.com/ory/kratos/driver"
 	"github.com/ory/kratos/driver/config"
+	kratos "github.com/ory/kratos/internal/httpclient"
 	"github.com/ory/kratos/selfservice/flow/verification"
 	"github.com/ory/kratos/x"
 	"github.com/ory/x/ioutilx"
@@ -34,21 +36,21 @@ func NewVerificationUIFlowEchoServer(t *testing.T, reg driver.Registry) *httptes
 	return ts
 }
 
-func GetVerificationFlow(t *testing.T, client *http.Client, ts *httptest.Server) *kratos.SelfServiceVerificationFlow {
+func GetVerificationFlow(t *testing.T, client *http.Client, ts *httptest.Server) *kratos.VerificationFlow {
 	publicClient := NewSDKCustomClient(ts, client)
 
 	res, err := client.Get(ts.URL + verification.RouteInitBrowserFlow)
 	require.NoError(t, err)
 	require.NoError(t, res.Body.Close())
 
-	rs, _, err := publicClient.V0alpha2Api.GetSelfServiceVerificationFlow(context.Background()).Id(res.Request.URL.Query().Get("flow")).Execute()
+	rs, _, err := publicClient.FrontendAPI.GetVerificationFlow(context.Background()).Id(res.Request.URL.Query().Get("flow")).Execute()
 	require.NoError(t, err, "%s", res.Request.URL.String())
-	assert.Empty(t, rs.Active)
+	assert.NotEmpty(t, rs.Active)
 
 	return rs
 }
 
-func InitializeVerificationFlowViaBrowser(t *testing.T, client *http.Client, isSPA bool, ts *httptest.Server) *kratos.SelfServiceVerificationFlow {
+func InitializeVerificationFlowViaBrowser(t *testing.T, client *http.Client, isSPA bool, ts *httptest.Server) *kratos.VerificationFlow {
 	publicClient := NewSDKCustomClient(ts, client)
 	req, err := http.NewRequest("GET", ts.URL+verification.RouteInitBrowserFlow, nil)
 	require.NoError(t, err)
@@ -60,27 +62,27 @@ func InitializeVerificationFlowViaBrowser(t *testing.T, client *http.Client, isS
 
 	res, err := client.Do(req)
 	require.NoError(t, err)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if isSPA {
-		var f kratos.SelfServiceVerificationFlow
+		var f kratos.VerificationFlow
 		require.NoError(t, json.NewDecoder(res.Body).Decode(&f))
 		return &f
 	}
 
-	rs, _, err := publicClient.V0alpha2Api.GetSelfServiceVerificationFlow(context.Background()).Id(res.Request.URL.Query().Get("flow")).Execute()
+	rs, _, err := publicClient.FrontendAPI.GetVerificationFlow(context.Background()).Id(res.Request.URL.Query().Get("flow")).Execute()
 	require.NoError(t, err)
-	assert.Empty(t, rs.Active)
+	assert.NotEmpty(t, rs.Active)
 
 	return rs
 }
 
-func InitializeVerificationFlowViaAPI(t *testing.T, client *http.Client, ts *httptest.Server) *kratos.SelfServiceVerificationFlow {
+func InitializeVerificationFlowViaAPI(t *testing.T, client *http.Client, ts *httptest.Server) *kratos.VerificationFlow {
 	publicClient := NewSDKCustomClient(ts, client)
 
-	rs, _, err := publicClient.V0alpha2Api.InitializeSelfServiceVerificationFlowWithoutBrowser(context.Background()).Execute()
+	rs, _, err := publicClient.FrontendAPI.CreateNativeVerificationFlow(context.Background()).Execute()
 	require.NoError(t, err)
-	assert.Empty(t, rs.Active)
+	assert.NotEmpty(t, rs.Active)
 
 	return rs
 }
@@ -88,7 +90,7 @@ func InitializeVerificationFlowViaAPI(t *testing.T, client *http.Client, ts *htt
 func VerificationMakeRequest(
 	t *testing.T,
 	isAPI bool,
-	f *kratos.SelfServiceVerificationFlow,
+	f *kratos.VerificationFlow,
 	hc *http.Client,
 	values string,
 ) (string, *http.Response) {
@@ -96,7 +98,7 @@ func VerificationMakeRequest(
 
 	res, err := hc.Do(NewRequest(t, isAPI, "POST", f.Ui.Action, bytes.NewBufferString(values)))
 	require.NoError(t, err)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	return string(ioutilx.MustReadAll(res.Body)), res
 }
@@ -113,7 +115,7 @@ func SubmitVerificationForm(
 	expectedStatusCode int,
 	expectedURL string,
 ) string {
-	var f *kratos.SelfServiceVerificationFlow
+	var f *kratos.VerificationFlow
 	if isAPI {
 		f = InitializeVerificationFlowViaAPI(t, hc, publicTS)
 	} else {

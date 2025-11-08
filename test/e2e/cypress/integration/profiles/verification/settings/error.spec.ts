@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 import {
   appPrefix,
   assertVerifiableAddress,
@@ -6,8 +9,8 @@ import {
   verifyHrefPattern,
 } from "../../../../helpers"
 
-import { routes as react } from "../../../../helpers/react"
 import { routes as express } from "../../../../helpers/express"
+import { routes as react } from "../../../../helpers/react"
 
 context("Account Verification Settings Error", () => {
   ;[
@@ -38,7 +41,7 @@ context("Account Verification Settings Error", () => {
         })
 
         beforeEach(() => {
-          cy.longLinkLifespan()
+          cy.useConfig((builder) => builder.longCodeLifespan())
           identity = gen.identityWithWebsite()
           cy.clearAllCookies()
           cy.registerApi(identity)
@@ -49,7 +52,7 @@ context("Account Verification Settings Error", () => {
         })
 
         it("is unable to verify the email address if the code is no longer valid", () => {
-          cy.shortLinkLifespan()
+          cy.shortCodeLifespan()
           cy.visit(settings)
 
           const email = `not-${identity.email}`
@@ -59,7 +62,7 @@ context("Account Verification Settings Error", () => {
           cy.get('button[value="profile"]').click()
 
           cy.verifyEmailButExpired({
-            expect: { email, password: identity.password },
+            expect: { email },
           })
         })
 
@@ -68,7 +71,10 @@ context("Account Verification Settings Error", () => {
           cy.get('input[name="traits.email"]').clear().type(email)
           cy.get('button[value="profile"]').click()
 
-          cy.getMail().then((mail) => {
+          cy.getMail({
+            body: "Verify your account",
+            email,
+          }).then((mail) => {
             const link = parseHtml(mail.body).querySelector("a")
 
             expect(verifyHrefPattern.test(link.href)).to.be.true

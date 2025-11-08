@@ -1,6 +1,10 @@
-import { appPrefix, gen, website } from "../../../helpers"
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
+import { appPrefix, gen } from "../../../helpers"
 import { routes as express } from "../../../helpers/express"
 import { routes as react } from "../../../helpers/react"
+import { testFlowWebhook } from "../../../helpers/webhook"
 
 const signup = (registration: string, app: string, email = gen.email()) => {
   cy.visit(registration)
@@ -111,11 +115,45 @@ context("Passwordless registration", () => {
         cy.get('[data-testid="ui/message/4000001"]').should("to.exist")
         cy.get(websiteTrait).should("have.value", "b")
         cy.get(emailTrait).should("have.value", email)
-        cy.get(websiteTrait).clear().type("https://www.ory.sh")
+        cy.get(websiteTrait).clear()
+        cy.get(websiteTrait).type("https://www.ory.sh")
         cy.clickWebAuthButton("register")
         cy.getSession({
           expectAal: "aal1",
           expectMethods: ["webauthn"],
+        }).then((session) => {
+          expect(session.identity.traits.email).to.equal(email)
+          expect(session.identity.traits.website).to.equal("https://www.ory.sh")
+        })
+      })
+
+      it("should pass transient_payload to webhook", () => {
+        testFlowWebhook(
+          (hooks) =>
+            cy.setupHooks("registration", "after", "webauthn", [
+              ...hooks,
+              { hook: "session" },
+            ]),
+          () => {
+            signup(registration, app)
+          },
+        )
+      })
+
+      // I have no idea why this does not work in an E2E test. It works just fine manually.
+      xit("should use webauthn credential as passkey", () => {
+        const email = gen.email()
+
+        signup(registration, app, email)
+        cy.logout()
+        cy.visit(login)
+
+        cy.get('[name="passkey_login_trigger"]').click()
+        cy.wait(1000)
+
+        cy.getSession({
+          expectAal: "aal1",
+          expectMethods: ["passkey"],
         }).then((session) => {
           expect(session.identity.traits.email).to.equal(email)
           expect(session.identity.traits.website).to.equal("https://www.ory.sh")
@@ -151,7 +189,7 @@ context("Passwordless registration", () => {
         const email = gen.email()
         signup(registration, app, email)
         cy.visit(settings)
-        cy.get('[name="webauthn_remove"]').should("not.exist")
+        cy.get('[name="webauthn_remove"]').should("be.disabled")
       })
 
       it("should be able to link password and use both methods for sign in", () => {
@@ -159,7 +197,7 @@ context("Passwordless registration", () => {
         const password = gen.password()
         signup(registration, app, email)
         cy.visit(settings)
-        cy.get('[name="webauthn_remove"]').should("not.exist")
+        cy.get('[name="webauthn_remove"]').should("be.disabled")
         cy.get('[name="password"]').type(password)
         cy.get('[value="password"]').click()
         cy.expectSettingsSaved()
@@ -278,7 +316,7 @@ context("Passwordless registration", () => {
         cy.get('[name="webauthn_login_trigger"]').should("not.exist")
 
         cy.visit(settings)
-        cy.get('[name="webauthn_remove"]').should("not.exist")
+        cy.get('[name="webauthn_remove"]').should("be.disabled")
         cy.get('[name="webauthn_register_displayname"]').type("key2")
         cy.clickWebAuthButton("register")
         cy.expectSettingsSaved()

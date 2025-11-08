@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 import { gen, MOBILE_URL, website } from "../../../../helpers"
 
 context("Mobile Profile", () => {
@@ -14,6 +17,7 @@ context("Mobile Profile", () => {
     })
 
     beforeEach(() => {
+      cy.clearAllCookies()
       cy.visit(MOBILE_URL + "/Login")
     })
 

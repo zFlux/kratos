@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package sql
 
 import (
@@ -5,12 +8,8 @@ import (
 
 	"github.com/ory/x/popx"
 
-	"github.com/gobuffalo/pop/v6"
+	"github.com/ory/pop/v6"
 )
-
-func WithTransaction(ctx context.Context, tx *pop.Connection) context.Context {
-	return popx.WithTransaction(ctx, tx)
-}
 
 func (p *Persister) Transaction(ctx context.Context, callback func(ctx context.Context, connection *pop.Connection) error) error {
 	return popx.Transaction(ctx, p.c.WithContext(ctx), callback)

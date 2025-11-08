@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package email
 
 import (
@@ -15,9 +18,10 @@ type (
 		m *TestStubModel
 	}
 	TestStubModel struct {
-		To      string
-		Subject string
-		Body    string
+		To       string `json:"to"`
+		Subject  string `json:"subject"`
+		Body     string `json:"body"`
+		HTMLBody string `json:"html_body,omitempty"`
 	}
 )
 
@@ -45,4 +49,8 @@ func (t *TestStub) EmailBodyPlaintext(ctx context.Context) (string, error) {
 
 func (t *TestStub) MarshalJSON() ([]byte, error) {
 	return json.Marshal(t.m)
+}
+
+func (t *TestStub) TemplateType() template.TemplateType {
+	return template.TypeTestStub
 }

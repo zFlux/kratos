@@ -1,9 +1,12 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package identities
 
 import (
 	"fmt"
 
-	kratos "github.com/ory/kratos-client-go"
+	kratos "github.com/ory/kratos/internal/httpclient"
 	"github.com/ory/kratos/x"
 	"github.com/ory/x/cmdx"
 	"github.com/ory/x/stringsx"
@@ -63,8 +66,8 @@ func NewGetIdentityCmd() *cobra.Command {
 			identities := make([]kratos.Identity, 0, len(args))
 			failed := make(map[string]error)
 			for _, id := range args {
-				identity, _, err := c.V0alpha2Api.
-					AdminGetIdentity(cmd.Context(), id).
+				identity, _, err := c.IdentityAPI.
+					GetIdentity(cmd.Context(), id).
 					IncludeCredential(includeCreds).
 					Execute()
 
@@ -79,7 +82,7 @@ func NewGetIdentityCmd() *cobra.Command {
 			if len(identities) == 1 {
 				cmdx.PrintRow(cmd, (*outputIdentity)(&identities[0]))
 			} else if len(identities) > 1 {
-				cmdx.PrintTable(cmd, &outputIdentityCollection{identities})
+				cmdx.PrintTable(cmd, &outputIdentityCollection{Identities: identities, includePageToken: false})
 			}
 			cmdx.PrintErrors(cmd, failed)
 

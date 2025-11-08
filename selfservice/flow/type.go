@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package flow
 
 // Type is the flow type.
@@ -18,4 +21,12 @@ func (t Type) IsBrowser() bool {
 
 func (t Type) IsAPI() bool {
 	return t == TypeAPI
+}
+
+func (t Type) Valid() bool {
+	switch t {
+	case TypeAPI, TypeBrowser:
+		return true
+	}
+	return false
 }

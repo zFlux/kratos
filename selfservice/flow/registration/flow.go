@@ -1,3 +1,6 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
 package registration
 
 import (
@@ -7,32 +10,42 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/gobuffalo/pop/v6"
-
-	"github.com/tidwall/gjson"
-
-	"github.com/ory/x/sqlxx"
-
-	"github.com/ory/kratos/driver/config"
-	"github.com/ory/kratos/ui/container"
-
 	"github.com/gofrs/uuid"
 	"github.com/pkg/errors"
+	"github.com/tidwall/gjson"
 
-	"github.com/ory/x/urlx"
-
+	hydraclientgo "github.com/ory/hydra-client-go/v2"
+	"github.com/ory/kratos/driver/config"
+	"github.com/ory/kratos/hydra"
 	"github.com/ory/kratos/identity"
 	"github.com/ory/kratos/selfservice/flow"
+	"github.com/ory/kratos/ui/container"
 	"github.com/ory/kratos/x"
+	"github.com/ory/kratos/x/redir"
+	"github.com/ory/pop/v6"
+	"github.com/ory/x/sqlxx"
+	"github.com/ory/x/urlx"
 )
 
-// swagger:model selfServiceRegistrationFlow
+// swagger:model registrationFlow
 type Flow struct {
 	// ID represents the flow's unique ID. When performing the registration flow, this
 	// represents the id in the registration ui's query parameter: http://<selfservice.flows.registration.ui_url>/?flow=<id>
 	//
 	// required: true
 	ID uuid.UUID `json:"id" faker:"-" db:"id"`
+
+	// Ory OAuth 2.0 Login Challenge.
+	//
+	// This value is set using the `login_challenge` query parameter of the registration and login endpoints.
+	// If set will cooperate with Ory OAuth2 and OpenID to act as an OAuth2 server / OpenID Provider.
+	OAuth2LoginChallenge sqlxx.NullString `json:"oauth2_login_challenge,omitempty" faker:"-" db:"oauth2_login_challenge_data"`
+
+	// HydraLoginRequest is an optional field whose presence indicates that Kratos
+	// is being used as an identity provider in a Hydra OAuth2 flow. Kratos
+	// populates this field by retrieving its value from Hydra and it is used by
+	// the login and consent UIs.
+	HydraLoginRequest *hydraclientgo.OAuth2LoginRequest `json:"oauth2_login_request,omitempty" faker:"-" db:"-"`
 
 	// Type represents the flow's type which can be either "api" or "browser", depending on the flow interaction.
 	//
@@ -62,6 +75,9 @@ type Flow struct {
 	// ReturnTo contains the requested return_to URL.
 	ReturnTo string `json:"return_to,omitempty" db:"-"`
 
+	// ReturnToVerification contains the redirect URL for the verification flow.
+	ReturnToVerification string `json:"-" db:"-"`
+
 	// Active, if set, contains the registration method that is being used. It is initially
 	// not set.
 	Active identity.CredentialsType `json:"active,omitempty" faker:"identity_credentials_type" db:"active_method"`
@@ -78,9 +94,46 @@ type Flow struct {
 	UpdatedAt time.Time `json:"-" faker:"-" db:"updated_at"`
 
 	// CSRFToken contains the anti-csrf token associated with this flow. Only set for browser flows.
-	CSRFToken string    `json:"-" db:"csrf_token"`
-	NID       uuid.UUID `json:"-"  faker:"-" db:"nid"`
+	CSRFToken      string        `json:"-" db:"csrf_token"`
+	NID            uuid.UUID     `json:"-" faker:"-" db:"nid"`
+	OrganizationID uuid.NullUUID `json:"organization_id,omitempty"  faker:"-" db:"organization_id"`
+
+	// TransientPayload is used to pass data from the registration to a webhook
+	//
+	// required: false
+	TransientPayload json.RawMessage `json:"transient_payload,omitempty" faker:"-" db:"-"`
+
+	// Contains a list of actions, that could follow this flow
+	//
+	// It can, for example, contain a reference to the verification flow, created as part of the user's
+	// registration.
+	ContinueWithItems []flow.ContinueWith `json:"-" db:"-" faker:"-" `
+
+	// SessionTokenExchangeCode holds the secret code that the client can use to retrieve a session token after the flow has been completed.
+	// This is only set if the client has requested a session token exchange code, and if the flow is of type "api",
+	// and only on creating the flow.
+	SessionTokenExchangeCode string `json:"session_token_exchange_code,omitempty" faker:"-" db:"-"`
+
+	// State represents the state of this request:
+	//
+	// - choose_method: ask the user to choose a method (e.g. registration with email)
+	// - sent_email: the email has been sent to the user
+	// - passed_challenge: the request was successful and the registration challenge was passed.
+	// required: true
+	State State `json:"state" faker:"-" db:"state"`
+
+	// only used internally
+	IDToken string `json:"-" faker:"-" db:"-"`
+	// Only used internally
+	RawIDTokenNonce string `json:"-" db:"-"`
+
+	// IdentitySchema optionally holds the ID of the identity schema that is used
+	// for this flow. This value can be set by the user when creating the flow and
+	// should be retained when the flow is saved or converted to another flow.
+	IdentitySchema flow.IdentitySchema `json:"identity_schema,omitempty" faker:"-" db:"identity_schema_id"`
 }
+
+var _ flow.Flow = new(Flow)
 
 func NewFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Request, ft flow.Type) (*Flow, error) {
 	now := time.Now().UTC()
@@ -88,21 +141,35 @@ func NewFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Reques
 
 	// Pre-validate the return to URL which is contained in the HTTP request.
 	requestURL := x.RequestURL(r).String()
-	_, err := x.SecureRedirectTo(r,
+	_, err := redir.SecureRedirectTo(r,
 		conf.SelfServiceBrowserDefaultReturnTo(r.Context()),
-		x.SecureRedirectUseSourceURL(requestURL),
-		x.SecureRedirectAllowURLs(conf.SelfServiceBrowserAllowedReturnToDomains(r.Context())),
-		x.SecureRedirectAllowSelfServiceURLs(conf.SelfPublicURL(r.Context())),
+		redir.SecureRedirectUseSourceURL(requestURL),
+		redir.SecureRedirectAllowURLs(conf.SelfServiceBrowserAllowedReturnToDomains(r.Context())),
+		redir.SecureRedirectAllowSelfServiceURLs(conf.SelfPublicURL(r.Context())),
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	hlc, err := hydra.GetLoginChallengeID(conf, r)
+	if err != nil {
+		return nil, err
+	}
+
+	identitySchema := ""
+	if requestedSchema := r.URL.Query().Get("identity_schema"); requestedSchema != "" {
+		identitySchema, err = conf.SelfServiceFlowIdentitySchema(r.Context(), requestedSchema)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &Flow{
-		ID:         id,
-		ExpiresAt:  now.Add(exp),
-		IssuedAt:   now,
-		RequestURL: requestURL,
+		ID:                   id,
+		OAuth2LoginChallenge: hlc,
+		ExpiresAt:            now.Add(exp),
+		IssuedAt:             now,
+		RequestURL:           requestURL,
 		UI: &container.Container{
 			Method: "POST",
 			Action: flow.AppendFlowTo(urlx.AppendPaths(conf.SelfPublicURL(r.Context()), RouteSubmitFlow), id).String(),
@@ -110,38 +177,31 @@ func NewFlow(conf *config.Config, exp time.Duration, csrf string, r *http.Reques
 		CSRFToken:       csrf,
 		Type:            ft,
 		InternalContext: []byte("{}"),
+		State:           flow.StateChooseMethod,
+		IdentitySchema:  flow.IdentitySchema(identitySchema),
 	}, nil
 }
 
-func (f Flow) TableName(ctx context.Context) string {
-	return "selfservice_registration_flows"
-}
-
-func (f Flow) GetID() uuid.UUID {
-	return f.ID
-}
-
-func (f Flow) GetNID() uuid.UUID {
-	return f.NID
-}
+func (Flow) TableName() string                                { return "selfservice_registration_flows" }
+func (f Flow) GetID() uuid.UUID                               { return f.ID }
+func (f *Flow) AppendTo(src *url.URL) *url.URL                { return flow.AppendFlowTo(src, f.ID) }
+func (f *Flow) GetType() flow.Type                            { return f.Type }
+func (f *Flow) GetRequestURL() string                         { return f.RequestURL }
+func (f *Flow) GetInternalContext() sqlxx.JSONRawMessage      { return f.InternalContext }
+func (f *Flow) SetInternalContext(bytes sqlxx.JSONRawMessage) { f.InternalContext = bytes }
+func (f *Flow) GetUI() *container.Container                   { return f.UI }
+func (f *Flow) GetState() State                               { return f.State }
+func (Flow) GetFlowName() flow.FlowName                       { return flow.RegistrationFlow }
+func (f *Flow) SetState(state State)                          { f.State = state }
+func (f *Flow) GetTransientPayload() json.RawMessage          { return f.TransientPayload }
+func (f *Flow) SetReturnToVerification(to string)             { f.ReturnToVerification = to }
+func (f *Flow) GetOAuth2LoginChallenge() sqlxx.NullString     { return f.OAuth2LoginChallenge }
 
 func (f *Flow) Valid() error {
 	if f.ExpiresAt.Before(time.Now()) {
 		return errors.WithStack(flow.NewFlowExpiredError(f.ExpiresAt))
 	}
 	return nil
-}
-
-func (f *Flow) AppendTo(src *url.URL) *url.URL {
-	return flow.AppendFlowTo(src, f.ID)
-}
-
-func (f *Flow) GetType() flow.Type {
-	return f.Type
-}
-
-func (f *Flow) GetRequestURL() string {
-	return f.RequestURL
 }
 
 func (f *Flow) EnsureInternalContext() {
@@ -176,6 +236,33 @@ func (f *Flow) AfterSave(*pop.Connection) error {
 	return nil
 }
 
-func (f *Flow) GetUI() *container.Container {
-	return f.UI
+func (f *Flow) AddContinueWith(c flow.ContinueWith) {
+	f.ContinueWithItems = append(f.ContinueWithItems, c)
+}
+
+func (f *Flow) ContinueWith() []flow.ContinueWith { return f.ContinueWithItems }
+
+func (f *Flow) SecureRedirectToOpts(ctx context.Context, cfg config.Provider) (opts []redir.SecureRedirectOption) {
+	return []redir.SecureRedirectOption{
+		redir.SecureRedirectReturnTo(f.ReturnTo),
+		redir.SecureRedirectUseSourceURL(f.RequestURL),
+		redir.SecureRedirectAllowURLs(cfg.Config().SelfServiceBrowserAllowedReturnToDomains(ctx)),
+		redir.SecureRedirectAllowSelfServiceURLs(cfg.Config().SelfPublicURL(ctx)),
+		redir.SecureRedirectOverrideDefaultReturnTo(cfg.Config().SelfServiceFlowRegistrationReturnTo(ctx, f.Active.String())),
+	}
+}
+
+func (f *Flow) ToLoggerField() map[string]any {
+	if f == nil {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"id":          f.ID.String(),
+		"return_to":   f.ReturnTo,
+		"request_url": f.RequestURL,
+		"active":      f.Active,
+		"Type":        f.Type,
+		"nid":         f.NID,
+		"state":       f.State,
+	}
 }

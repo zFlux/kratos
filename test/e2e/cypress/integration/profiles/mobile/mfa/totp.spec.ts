@@ -1,5 +1,8 @@
-import { APP_URL, gen, MOBILE_URL, website } from "../../../../helpers"
-import { authenticator } from "otplib"
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
+import { gen, MOBILE_URL, website } from "../../../../helpers"
+import { TOTP } from "otpauth"
 
 context("Mobile Profile", () => {
   describe("TOTP 2FA Flow", () => {
@@ -46,7 +49,11 @@ context("Mobile Profile", () => {
           secret = $e.text().trim()
         })
         cy.get('*[data-testid="field/totp_code"]').then(($e) => {
-          cy.wrap($e).type(authenticator.generate(secret))
+          cy.wrap($e).type(
+            new TOTP({
+              secret,
+            }).generate(),
+          )
         })
         cy.get('*[data-testid="field/method/totp"]').click()
         cy.expectSettingsSaved()
@@ -72,7 +79,11 @@ context("Mobile Profile", () => {
 
         // Use the correct code
         cy.get('*[data-testid="field/totp_code"]').then(($e) => {
-          cy.wrap($e).type(authenticator.generate(secret))
+          cy.wrap($e).type(
+            new TOTP({
+              secret,
+            }).generate(),
+          )
         })
         cy.get('*[data-testid="field/method/totp"]').click()
 

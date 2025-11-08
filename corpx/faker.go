@@ -1,41 +1,44 @@
+// Copyright © 2023 Ory Corp
+// SPDX-License-Identifier: Apache-2.0
+
+// #nosec G404 -- used in tests only
 package corpx
 
 import (
 	"math/rand"
 	"net/http"
 	"reflect"
+	"sync"
 	"time"
 
-	"github.com/ory/kratos/session"
-	"github.com/ory/x/stringsx"
-
-	"github.com/bxcodec/faker/v3"
+	"github.com/go-faker/faker/v4"
 
 	"github.com/ory/kratos/identity"
 	"github.com/ory/kratos/selfservice/flow"
+	"github.com/ory/kratos/session"
 	"github.com/ory/kratos/ui/node"
 	"github.com/ory/kratos/x"
+	"github.com/ory/x/pointerx"
 	"github.com/ory/x/randx"
 )
 
-var setup bool
+var setup sync.Once
 
 func RegisterFakes() {
-	if setup {
-		return
-	}
-	setup = true
+	setup.Do(registerFakes)
+}
 
+func registerFakes() {
 	_ = faker.SetRandomMapAndSliceSize(4)
 
 	if err := faker.AddProvider("ptr_geo_location", func(v reflect.Value) (interface{}, error) {
-		return stringsx.GetPointer("Munich, Germany"), nil
+		return pointerx.Ptr("Munich, Germany"), nil
 	}); err != nil {
 		panic(err)
 	}
 
 	if err := faker.AddProvider("ptr_ipv4", func(v reflect.Value) (interface{}, error) {
-		return stringsx.GetPointer(faker.IPv4()), nil
+		return pointerx.Ptr(faker.IPv4()), nil
 	}); err != nil {
 		panic(err)
 	}
@@ -143,6 +146,12 @@ func RegisterFakes() {
 	if err := faker.AddProvider("session_device", func(v reflect.Value) (interface{}, error) {
 		var d session.Device
 		return &d, faker.FakeData(&d)
+	}); err != nil {
+		panic(err)
+	}
+
+	if err := faker.AddProvider("aal_type", func(v reflect.Value) (interface{}, error) {
+		return "aal1", nil
 	}); err != nil {
 		panic(err)
 	}
